@@ -7,6 +7,8 @@ from bscpp.backtest.vol_surface import (
     fit_svi_slice,
     svi_butterfly_arbitrage_check,
     svi_fit_rmse,
+    svi_g_function,
+    svi_gatheral_jacquier_check,
     svi_min_total_variance,
 )
 
@@ -23,6 +25,8 @@ __all__ = [
     "svi_fit_rmse",
     "svi_min_total_variance",
     "svi_butterfly_arbitrage_check",
+    "svi_g_function",
+    "svi_gatheral_jacquier_check",
     "calibrate_heston",
     "heston_fit_rmse",
 ]

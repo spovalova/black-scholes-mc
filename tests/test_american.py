@@ -32,7 +32,10 @@ def test_lsm_std_error_shrinks_with_more_paths():
 def test_american_put_matches_longstaff_schwartz_2001_benchmark():
     # S0=36, K=40, r=6%, sigma=20%, T=1y is the headline example from
     # Longstaff & Schwartz (2001), "Valuing American Options by Simulation:
-    # A Simple Least-Squares Approach". Published price ~= 4.478.
+    # A Simple Least-Squares Approach". Independent implementations of this
+    # exact case (parameters confirmed against the paper) converge to
+    # values in the ~4.47-4.48 range; the tolerance below absorbs the small
+    # spread across sources/seeds rather than pinning to one exact digit.
     result = bscpp.price_american(36, 40, 0.06, 0.2, 1.0, "put", num_paths=80_000, num_steps=50,
                                    seed=7)
     assert math.isclose(result.price, 4.478, abs_tol=0.10)

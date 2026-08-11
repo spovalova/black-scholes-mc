@@ -24,6 +24,18 @@ public:
     // Solve for implied volatility given an observed market price via
     // Newton-Raphson with a bisection fallback for robustness.
     // Returns NaN if it fails to converge within max_iter.
+    //
+    // Known limitation: this is materially weaker than the industry-
+    // standard solver, Peter Jaeckel's "Let's Be Rational" (2015, used by
+    // py_vollib) -- four rational-function initial guesses selected by
+    // moneyness region plus 4th-order Householder iteration, engineered to
+    // converge to full float64 precision in ~2 iterations for EVERY input,
+    // including deep ITM/OTM. This is not a hypothetical gap: it is the
+    // exact reason StripPricer's IV solve can fail (return NaN, triggering
+    // the 0.20 fallback documented in engine.py) on deep-ITM/OTM synthetic
+    // contracts whose quoted price sits close to the intrinsic-value floor
+    // implied by vol->0 -- precisely the boundary regime Jaeckel's method
+    // exists to handle robustly and this Newton+bisection solver does not.
     static double implied_vol(const MarketInputs& in, double market_price,
                                double initial_guess = 0.2, int max_iter = 100,
                                double tol = 1e-8);

@@ -14,6 +14,16 @@ polynomial fit in strike.
 
 Fitting one slice (one expiration) at a time here -- a full surface is a
 sequence of per-expiry SVISlice fits, one per available expiration.
+
+Known limitation: fitting slices independently gives NO guarantee they're
+jointly consistent across expiries (no calendar-spread arbitrage). That
+guarantee is exactly what Gatheral & Jacquier's SSVI (surface) extension of
+this same paper exists to provide -- via a condition on how ATM total
+variance and the smile's curvature must co-move across maturities. This
+project implements single-slice SVI only; two slices fit independently by
+`fit_svi_slice` at different expiries could still imply a calendar
+arbitrage between them even if each individually passes
+`svi_gatheral_jacquier_check`/`svi_butterfly_arbitrage_check`.
 """
 
 from __future__ import annotations
@@ -40,6 +50,20 @@ class SVISlice:
     def implied_vol(self, log_moneyness):
         w = np.maximum(self.total_variance(log_moneyness), 0.0)
         return np.sqrt(w / self.t)
+
+    def total_variance_derivative(self, log_moneyness):
+        """w'(k) = b*(rho + u/s), u = k-m, s = sqrt(u^2+sigma^2)."""
+        k = np.asarray(log_moneyness, dtype=float)
+        u = k - self.m
+        s = np.sqrt(u ** 2 + self.sigma ** 2)
+        return self.b * (self.rho + u / s)
+
+    def total_variance_second_derivative(self, log_moneyness):
+        """w''(k) = b*sigma^2 / s^3."""
+        k = np.asarray(log_moneyness, dtype=float)
+        u = k - self.m
+        s = np.sqrt(u ** 2 + self.sigma ** 2)
+        return self.b * self.sigma ** 2 / s ** 3
 
 
 def fit_svi_slice(
@@ -100,6 +124,46 @@ def svi_min_total_variance(svi: SVISlice) -> float:
     return svi.a + svi.b * svi.sigma * np.sqrt(max(1.0 - svi.rho ** 2, 0.0))
 
 
+def svi_g_function(svi: SVISlice, log_moneyness) -> np.ndarray:
+    """Gatheral & Jacquier (2013) g(k): a slice is butterfly-arbitrage-free
+    iff g(k) >= 0 for all real k (plus a tail condition standard SVI with
+    b>0 satisfies automatically -- see svi_gatheral_jacquier_check).
+
+        g(k) = (1 - k*w'(k)/(2*w(k)))^2 - (w'(k)^2/4)*(1/w(k) + 1/4) + w''(k)/2
+
+    This is the closed-form counterpart to svi_butterfly_arbitrage_check's
+    numerical Breeden-Litzenberger scan: same underlying no-arbitrage
+    condition (Gatheral-Jacquier derive g(k) by reparametrizing the exact
+    same density-positivity requirement from (strike, price) into
+    (log-moneyness, total-variance) coordinates), but here it's ~2 orders of
+    magnitude cheaper to evaluate and has no finite-difference noise floor --
+    at the cost of trusting this formula's transcription is correct, which
+    is exactly why both checks exist side by side rather than picking one.
+    """
+    k = np.asarray(log_moneyness, dtype=float)
+    w = svi.total_variance(k)
+    wp = svi.total_variance_derivative(k)
+    wpp = svi.total_variance_second_derivative(k)
+    return (1.0 - k * wp / (2.0 * w)) ** 2 - (wp ** 2 / 4.0) * (1.0 / w + 0.25) + wpp / 2.0
+
+
+def svi_gatheral_jacquier_check(
+    svi: SVISlice, k_range: tuple[float, float] = (-4.0, 4.0), n_points: int = 2000
+) -> dict:
+    """Closed-form no-butterfly-arbitrage check via g(k) >= 0.
+
+    Cheap enough to scan finely (default 2000 points) for the true global
+    minimum, unlike the numerical density check which is limited by pricer
+    calls per grid point. Standard SVI with b > 0 automatically satisfies
+    the paper's tail condition (lim_{k->inf} d+(k) = -inf), so g(k) >= 0
+    everywhere is the complete butterfly-arbitrage-free criterion here.
+    """
+    k = np.linspace(k_range[0], k_range[1], n_points)
+    g = svi_g_function(svi, k)
+    min_g = float(np.min(g))
+    return {"min_g": min_g, "arbitrage_free": bool(min_g >= 0.0), "k_grid": k, "g_values": g}
+
+
 def svi_butterfly_arbitrage_check(
     svi: SVISlice,
     spot: float,
@@ -119,6 +183,17 @@ def svi_butterfly_arbitrage_check(
     finite-difference second derivative -- directly checking the thing that
     actually matters (price-curve convexity), reusing machinery we've
     already validated elsewhere in this project.
+
+    Cross-referenced against svi_gatheral_jacquier_check's closed-form g(k)
+    (added after both were independently verified to agree on known
+    arbitrage-free and arbitrage-violating test slices): this numerical
+    check's tolerance is on absolute density, which is scale-dependent --
+    on very short-dated slices it can register a technically-negative value
+    of ~1e-13 that's pure finite-difference noise, saved only by the fixed
+    -1e-6 tolerance below happening to cover it. Prefer
+    svi_gatheral_jacquier_check for a precise verdict; keep this one as an
+    independent cross-check (same reasoning as HestonMCPricer existing
+    alongside HestonPricer) rather than the sole source of truth.
     """
     import bscpp  # local import: avoids vol_surface.py depending on bscpp at module load time
 

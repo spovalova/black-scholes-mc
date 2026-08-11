@@ -69,11 +69,19 @@ double HestonPricer::probability(double spot, double strike, double rate, double
     };
 
     // The integrand has a removable singularity at phi=0 (finite limit),
-    // so we start just past it rather than evaluating exactly there. The
-    // characteristic function decays for large phi, so truncating at a
-    // generous cutoff with a fine fixed-step Simpson's rule is adequate
-    // for the maturities/vol-of-vol ranges this project targets; genuinely
-    // extreme parameters would want adaptive quadrature instead.
+    // so we start just past it rather than evaluating exactly there (an
+    // approximation, not a proven-safe closed-form limit the way QuantLib's
+    // AnalyticHestonEngine handles it via L'Hopital). The fixed truncation
+    // at phi_max=200 with 4000 Simpson points has only been validated on
+    // the moderate maturity/vol-of-vol ranges exercised by this project's
+    // tests -- it has NOT been stress-tested against very short maturities
+    // or very high vol-of-vol, where the characteristic function decays
+    // more slowly and could silently lose accuracy at this fixed cutoff.
+    // Production engines (QuantLib) use ~144-point Gauss-Laguerre or
+    // adaptive Gauss-Lobatto quadrature here -- both far cheaper per
+    // evaluation and error-controlled, unlike this fixed-step rule. Fine
+    // for a single price; wasteful (and unverified at the edges) if used
+    // inside a tight calibration loop at scale.
     const double integral = simpson_integrate(integrand, 1e-8, 200.0, 4000);
     return 0.5 + integral / kPi;
 }

@@ -69,6 +69,7 @@ class HedgingBacktester:
 
         cash = result0.price - result0.greeks.delta * spot0
         shares = result0.greeks.delta
+        spot_prev = spot0
 
         rows = [{
             "date": dates[0], "spot": spot0, "T": t0, "delta": shares,
@@ -81,7 +82,15 @@ class HedgingBacktester:
             date = dates[i]
             spot = float(price_path.iloc[i])
             elapsed_days = (dates[i] - dates[i - 1]).days or 1
-            cash *= math.exp(self.rate * elapsed_days / 365.0)
+            dt_years = elapsed_days / 365.0
+            cash *= math.exp(self.rate * dt_years)
+            # Dividend income on the stock leg carried into this interval
+            # (held at `shares` since the last rebalance). Without this,
+            # the hedge is inconsistent with using dividend_yield-adjusted
+            # deltas from Black-Scholes, which price in the assumption that
+            # the stock holder collects this yield.
+            cash += shares * spot_prev * (math.exp(self.dividend_yield * dt_years) - 1.0)
+            spot_prev = spot
 
             t = max((expiration - date.date()).days, 0) / 365.0
             if t <= 0.0:
@@ -135,6 +144,22 @@ class HedgingBacktester:
         Taylor-expansion residual (higher-order terms + discrete-vs-
         continuous rebalancing effects); it should be small relative to the
         other terms for daily steps on typical single-name vol.
+
+        This is the per-day, non-asymptotic version of Carr & Madan's
+        (2002, "Towards a Theory of Volatility Trading") canonical result:
+        substituting the Black-Scholes PDE for theta and dS^2 ~= sigma_R^2
+        S^2 dt collapses the formula above to
+        gamma_pnl + theta_pnl ~= 0.5*Gamma*S^2*(hedge_vol^2 - sigma_R^2)*dt,
+        the standard "P&L from delta-hedging at the wrong vol" identity.
+
+        Known gap: `hedge_vol` is constant for the life of a run, so vega
+        P&L is exactly zero here by construction, not by finding it small.
+        On a real book, day-to-day vol re-marking is often the DOMINANT
+        source of daily option P&L, not gamma/theta -- if this backtester
+        is ever extended to a time-varying hedge_vol, attribution_error
+        would silently absorb the real vega P&L and mislabel it as
+        higher-order residual unless this decomposition is extended to
+        include an explicit vega term.
         """
         df = result.reset_index(drop=True).copy()
         n = len(df)

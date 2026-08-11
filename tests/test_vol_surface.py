@@ -5,6 +5,7 @@ from bscpp.backtest.vol_surface import (
     fit_svi_slice,
     svi_butterfly_arbitrage_check,
     svi_fit_rmse,
+    svi_gatheral_jacquier_check,
     svi_min_total_variance,
 )
 
@@ -59,3 +60,34 @@ def test_pathological_svi_slice_is_flagged_as_arbitrage_violating():
     result = svi_butterfly_arbitrage_check(svi, spot=spot, rate=rate)
     assert not result["arbitrage_free"]
     assert result["min_density"] < 0
+
+
+def test_closed_form_g_agrees_with_numerical_check_on_both_slices():
+    # The closed-form Gatheral-Jacquier g(k) check and the numerical
+    # Breeden-Litzenberger check are two independent routes to the same
+    # no-butterfly-arbitrage condition -- they should agree directionally.
+    spot, rate, t_years = 100.0, 0.03, 0.5
+    good = SVISlice(a=0.02, b=0.15, rho=-0.4, m=0.0, sigma=0.15, t=t_years)
+    bad = SVISlice(a=0.01, b=3.0, rho=-0.95, m=0.0, sigma=0.02, t=t_years)
+
+    good_closed = svi_gatheral_jacquier_check(good)
+    good_numeric = svi_butterfly_arbitrage_check(good, spot=spot, rate=rate)
+    assert good_closed["arbitrage_free"]
+    assert good_numeric["arbitrage_free"]
+
+    bad_closed = svi_gatheral_jacquier_check(bad)
+    bad_numeric = svi_butterfly_arbitrage_check(bad, spot=spot, rate=rate)
+    assert not bad_closed["arbitrage_free"]
+    assert not bad_numeric["arbitrage_free"]
+
+
+def test_closed_form_g_resolves_short_dated_noise_floor():
+    # A 1-day-maturity slice pushes the numerical density check's
+    # finite-difference noise close to its fixed tolerance (observed as low
+    # as ~1e-13 in stress testing). The closed-form check has no such
+    # noise floor and should give an unambiguous, comfortably positive
+    # verdict on a slice that is genuinely arbitrage-free.
+    stress = SVISlice(a=0.001, b=0.1, rho=-0.3, m=0.0, sigma=0.1, t=1 / 365)
+    result = svi_gatheral_jacquier_check(stress)
+    assert result["arbitrage_free"]
+    assert result["min_g"] > 1e-3  # unambiguous, not noise-floor-close to 0

@@ -19,7 +19,8 @@ def main():
     euro_put = bscpp.price(36, 40, 0.06, 0.2, 1.0, "put")
     amer_put = bscpp.price_american(36, 40, 0.06, 0.2, 1.0, "put", num_paths=100_000, num_steps=50)
     print(f"  European: {euro_put:.4f}")
-    print(f"  American: {amer_put.price:.4f} +/- {amer_put.std_error:.4f}  (paper reports ~4.478)")
+    print(f"  American: {amer_put.price:.4f} +/- {amer_put.std_error:.4f}  "
+          f"(independent implementations of this case converge to ~4.47-4.48)")
     print(f"  Early exercise premium: {amer_put.price - euro_put:.4f}")
 
 

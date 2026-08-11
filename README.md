@@ -42,7 +42,12 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
 **C++ pricing core**
 - Closed-form Black-Scholes-Merton (calls/puts, continuous dividend yield),
   full Greeks (delta, gamma, vega, theta, rho), and a Newton-Raphson +
-  bisection-fallback implied-vol solver.
+  bisection-fallback implied-vol solver. Known limitation, found via
+  external comparison: this is materially weaker than the industry-standard
+  solver, Peter Jaeckel's "Let's Be Rational" (2015, used by `py_vollib`) --
+  not hypothetical, it's the exact reason the deep-ITM IV-solve fallback
+  documented below (`StripPricer`) ever triggers (see `black_scholes.hpp`
+  for details).
 - **Batch pricing/IV variants** (`bs_price_with_greeks_batch`,
   `bs_implied_vol_batch`) that loop in C++ rather than crossing the
   Python/C++ boundary once per contract -- `StripPricer` prices a whole
@@ -57,9 +62,16 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   Monte Carlo**: simulates full paths, walks backward from maturity
   regressing realized continuation value onto a polynomial basis to decide
   optimal early exercise. Validated against the paper's own benchmark
-  (S=36, K=40, r=6%, vol=20%, T=1y -> published ~4.478) and against the
-  no-arbitrage identity that an American call with no dividends prices
-  identically to its European counterpart.
+  (S=36, K=40, r=6%, vol=20%, T=1y -> independent implementations converge
+  to ~4.47-4.48) and against the no-arbitrage identity that an American
+  call with no dividends prices identically to its European counterpart.
+  The ITM-only regression filter and monomial-basis-with-S/K-normalization
+  choice were both confirmed to match QuantLib's own production defaults.
+  Known gap, also confirmed against QuantLib: this regresses and prices
+  along the *same* path set, where QuantLib deliberately uses a
+  separately-seeded calibration set to avoid a known small upward
+  (look-ahead) bias -- likely small at this project's path counts, but not
+  eliminated the way QuantLib's is.
 
 **Multi-leg strategies** (`bscpp.strategies`)
 - `straddle`, `strangle`, `vertical_spread`, `butterfly`, and the two
@@ -81,19 +93,39 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   (`w(k) = a + b(rho(k-m) + sqrt((k-m)^2+sigma^2))`, total variance vs.
   log-moneyness) to a chain's implied vols. Verified to recover a known
   synthetic smile to <1e-4 RMSE.
-- `svi_butterfly_arbitrage_check`: rather than trusting a memorized
-  closed-form arbitrage condition on the SVI parameters, this prices calls
-  off the fitted smile with the (already-tested) BS pricer across a strike
-  grid and takes a finite-difference second derivative -- directly
-  applying **Breeden-Litzenberger (1978)**: the risk-neutral density
-  `q(K) = e^{rT} d^2C/dK^2` must be non-negative everywhere, or the smile
-  implies a butterfly arbitrage. Verified against both a well-behaved
-  slice (passes) and a deliberately pathological one (extreme rho, tiny
-  sigma -- correctly flagged as arbitrage-violating).
+- **Two independent no-arbitrage checks, cross-verified against each
+  other**: `svi_butterfly_arbitrage_check` prices calls off the fitted
+  smile with the (already-tested) BS pricer across a strike grid and takes
+  a finite-difference second derivative -- directly applying
+  **Breeden-Litzenberger (1978)**: the risk-neutral density
+  `q(K) = e^{rT} d^2C/dK^2` must be non-negative everywhere. Separately,
+  `svi_gatheral_jacquier_check` implements the closed-form `g(k) >= 0`
+  condition from Gatheral & Jacquier (2013) directly on the SVI
+  parameters -- the same underlying condition, reparametrized into
+  (log-moneyness, total-variance) coordinates so it's ~2 orders of
+  magnitude cheaper and has no finite-difference noise floor. Both were
+  confirmed to agree on a well-behaved slice (passes) and a deliberately
+  pathological one (extreme rho, tiny sigma -- both correctly flag
+  arbitrage). The closed-form check exists specifically because the
+  numerical one's fixed density tolerance is scale-dependent: on a 1-day
+  synthetic maturity it registered a technically-negative density of
+  ~1e-13 (finite-difference noise, saved only by the tolerance), while
+  `svi_gatheral_jacquier_check` gives an unambiguous answer on the same
+  slice.
+- Known gap: fitting slices independently (one `SVISlice` per expiry) has
+  no guarantee they're jointly consistent across expiries -- no
+  calendar-spread arbitrage guarantee, which is exactly what Gatheral &
+  Jacquier's SSVI surface extension of this same paper exists to provide
+  and this project does not implement.
 
 **Delta-hedging P&L + Greeks attribution** (`bscpp.backtest.hedging`)
 - `HedgingBacktester`: simulates selling an option and delta-hedging it
   daily at a given `hedge_vol` against a real or simulated price path.
+  Correctly credits dividend income on the stock hedge leg when
+  `dividend_yield > 0` -- an earlier version didn't, which was silently
+  inconsistent with using dividend-adjusted Black-Scholes deltas (caught
+  during external verification, since every existing test/demo happened
+  to use `dividend_yield=0` and never exercised the bug).
 - `realized_vs_implied_experiment`: sweeps realized vol against a fixed
   hedge_vol and shows the textbook result -- hedging at a vol *above* what
   actually realizes is profitable for the seller, *below* it is not, P&L
@@ -103,11 +135,19 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   gamma + theta terms, derived from a second-order Taylor expansion of the
   option's own pricing function (full derivation in the method's
   docstring). This recovers the classic "theta pays you, gamma costs you"
-  identity for a short, hedged option position, and is verified two ways:
+  identity for a short, hedged option position, and is verified three ways:
   the decomposition's daily sum exactly equals the simulation's own
-  cumulative P&L (an accounting identity, checked to float precision), and
-  the financing+gamma+theta prediction explains the large majority of
-  realized P&L with a bounded higher-order residual.
+  cumulative P&L (an accounting identity, checked to float precision); the
+  financing+gamma+theta prediction explains the large majority of realized
+  P&L with a bounded higher-order residual; and on a deterministic path
+  with an exact known realized vol, `financing+gamma+theta` matches
+  **Carr & Madan's (2002)** canonical closed-form limit
+  `0.5*Gamma*S^2*(hedge_vol^2 - realized_vol^2)*dt` to within ~0.5%.
+- Known gap: `hedge_vol` is constant for the life of a run, so vega P&L is
+  zero by construction, not by measurement -- on a real book, day-to-day
+  vol re-marking is often the *dominant* source of daily option P&L, which
+  this decomposition doesn't yet capture (documented in the method's
+  docstring).
 
 **Chain pricing vs. real market data** (`bscpp.backtest.engine`)
 - `StripPricer`/`Backtester`: pull a chain slice from a `DataProvider`,
@@ -158,11 +198,50 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   to reading options risk.
 
 **Deliberately out of scope** (documented, not silently missing): local vol
-(Dupire) and other stochastic vol models beyond Heston (SABR, rough vol), a
-full historical options-tick database integration, and a full backtest P&L
-simulation of *multi-leg* strategies over time (the hedging backtest covers
-single-leg positions; extending `HedgingBacktester` to net multi-leg Greeks
-is a natural next step on top of `strategies.py`).
+(Dupire), SSVI/other cross-expiry-consistent surface models, other
+stochastic vol models beyond Heston (SABR, rough vol), a full historical
+options-tick database integration, and a full backtest P&L simulation of
+*multi-leg* strategies over time (the hedging backtest covers single-leg
+positions; extending `HedgingBacktester` to net multi-leg Greeks is a
+natural next step on top of `strategies.py`).
+
+## External verification
+
+Every formula and algorithm above was checked against the published
+literature and/or a production implementation (mainly QuantLib's C++
+source) rather than trusted on the strength of passing this project's own
+tests alone -- self-consistent tests can pass even when a formula encodes
+the same subtle error twice. Highlights:
+
+- The Heston characteristic function was confirmed **term-by-term**
+  against QuantLib's `AnalyticHestonEngine` -- every intermediate quantity
+  (`d`, the little-trap substitution, the C/D coefficients) matches
+  exactly. Separately reassuring: QuantLib, Attari (2004), and
+  Andersen-Piterbarg (2010) each independently discovered and fixed the
+  *same* branch-cut instability in the original 1993 formula -- a known,
+  well-studied hard problem, not something this project got lucky avoiding.
+- LSM's in-the-money-only regression filter and monomial-basis-with-
+  normalization choice both match QuantLib's actual `MCAmericanEngine`
+  defaults.
+- The SVI numerical (Breeden-Litzenberger) and closed-form (Gatheral-
+  Jacquier g(k)) arbitrage checks were confirmed to agree with each other
+  on both a well-behaved and a pathological test slice.
+- The hedging P&L attribution's derivation was independently re-derived
+  from the Black-Scholes PDE and shown to algebraically collapse to
+  Carr & Madan's (2002) canonical realized-vs-implied-variance result --
+  matched numerically to within ~0.5% on a deterministic test path.
+- One real bug was found this way and fixed: `HedgingBacktester` wasn't
+  crediting dividend income on the stock hedge leg, silently inconsistent
+  with using dividend-adjusted deltas. Every existing test/demo used
+  `dividend_yield=0` and never exercised it.
+- Concrete, unresolved gaps this surfaced are called out inline above
+  (IV solver vs. Jaeckel's method, LSM's shared calibration/pricing path
+  set, no cross-expiry/SSVI arbitrage guarantee, Heston's fixed-step
+  quadrature vs. QuantLib's Gauss-Laguerre, hedging's vega P&L being zero
+  by construction) rather than fixed outright -- each is a real, literature-
+  backed limitation, not a bug, and the honest thing was to document them
+  rather than quietly patch over the gap between "correct" and
+  "production-grade."
 
 ## Setup
 
