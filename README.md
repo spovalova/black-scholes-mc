@@ -97,6 +97,18 @@ python examples/vol_surface_fit_demo.py       # SVI fit to a synthetic smile
 python examples/run_backtest.py --mock --ticker SPY   # full chain-pricing pipeline
 ```
 
+## Run against real data (needs an API key, no options entitlement required)
+
+```bash
+python examples/real_data_hedging_demo.py --ticker AAPL --hedge-vol 0.30
+```
+
+This pulls real historical daily closes and runs the delta-hedging
+backtest against them -- confirmed working on Polygon/Massive's **base**
+equities tier (their daily aggregates endpoint doesn't require an options
+plan). `run_backtest.py`/`StripPricer` (chain snapshots) is the one demo
+that does need an options-capable plan -- see below.
+
 Sample output from `hedging_pnl_experiment.py` (selling an ATM call, hedging
 daily at 30% vol, 60 days to expiry, 400 simulated paths per realized-vol
 level):
@@ -112,12 +124,16 @@ level):
 
 ## Real market data
 
-The backtester targets [Polygon.io](https://polygon.io). Options chain
-data requires at least their "Options Starter" plan (the free tier is
-equities-only); daily underlying price history (`get_price_history`, used
-by the hedging backtest) works on the base equities tier. Historical chain
-*snapshots* for arbitrary past dates require a higher tier still -- see the
-`Backtester` docstring in `python/bscpp/backtest/engine.py`.
+The backtester targets Polygon.io's REST API (the company has since
+rebranded to "Massive", but the API itself is unchanged -- `PolygonProvider`
+still hits `api.polygon.io` and that's confirmed working). Options chain
+data requires at least an "Options Starter" plan (a base-tier key gets a
+`403 NOT_AUTHORIZED` on `/v3/snapshot/options/...`, confirmed against a live
+key); daily underlying price history (`get_price_history`, used by the
+hedging backtest) works fine on the base equities tier, confirmed against
+real AAPL data. Historical chain *snapshots* for arbitrary past dates
+require a higher tier still -- see the `Backtester` docstring in
+`python/bscpp/backtest/engine.py`.
 
 Set your key via environment variable or a local `.env` (gitignored):
 
