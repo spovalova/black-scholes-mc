@@ -49,9 +49,31 @@ def test_implied_vol_round_trip():
     assert math.isclose(iv, 0.35, abs_tol=1e-4)
 
 
+def test_mc_std_error_scales_as_inverse_sqrt_n():
+    # Monte Carlo error should shrink as 1/sqrt(N): 16x the paths should
+    # roughly quarter the standard error.
+    inputs = _inputs("call")
+    small = bscpp.MonteCarloPricer(seed=1).price_european(inputs, 10_000, True)
+    large = bscpp.MonteCarloPricer(seed=1).price_european(inputs, 160_000, True)
+    ratio = small.std_error / large.std_error
+    assert 3.0 < ratio < 5.5  # sqrt(16) = 4, generous slack for sampling noise
+
+
 def test_mc_greeks_close_to_bs():
     inputs = _inputs("call")
     bs = bscpp.bs_greeks(inputs)
     mc = bscpp.MonteCarloPricer(seed=7).greeks_european(inputs, 200_000, True)
     assert math.isclose(mc.delta, bs.delta, abs_tol=0.03)
     assert math.isclose(mc.vega, bs.vega, abs_tol=1.5)
+
+
+def test_trading_greeks_unit_conversion():
+    greeks = bscpp.bs_greeks(_inputs("call"))
+    desk = bscpp.trading_greeks(greeks)
+    assert desk["delta"] == greeks.delta
+    assert desk["gamma"] == greeks.gamma
+    assert math.isclose(desk["vega_per_vol_point"], greeks.vega / 100.0)
+    assert math.isclose(desk["theta_per_day"], greeks.theta / 365.0)
+    assert math.isclose(desk["rho_per_rate_point"], greeks.rho / 100.0)
+    # sanity: daily theta should be a small fraction of the annualized figure
+    assert abs(desk["theta_per_day"]) < abs(greeks.theta)

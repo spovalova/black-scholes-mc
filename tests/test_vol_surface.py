@@ -1,6 +1,12 @@
 import numpy as np
 
-from bscpp.backtest.vol_surface import fit_svi_slice, svi_fit_rmse
+from bscpp.backtest.vol_surface import (
+    SVISlice,
+    fit_svi_slice,
+    svi_butterfly_arbitrage_check,
+    svi_fit_rmse,
+    svi_min_total_variance,
+)
 
 
 def test_svi_recovers_a_known_smile():
@@ -32,3 +38,24 @@ def test_svi_fit_handles_sparse_smile_gracefully():
     fitted = fit_svi_slice(strikes, ivs, spot=spot, t_years=t_years)
     rmse = svi_fit_rmse(fitted, strikes, ivs, spot=spot)
     assert rmse < 0.02
+
+
+def test_well_behaved_svi_slice_is_arbitrage_free():
+    spot, rate, t_years = 100.0, 0.03, 0.5
+    svi = SVISlice(a=0.02, b=0.15, rho=-0.4, m=0.0, sigma=0.15, t=t_years)
+
+    assert svi_min_total_variance(svi) > 0
+    result = svi_butterfly_arbitrage_check(svi, spot=spot, rate=rate)
+    assert result["arbitrage_free"]
+    assert result["min_density"] > -1e-6
+
+
+def test_pathological_svi_slice_is_flagged_as_arbitrage_violating():
+    # extreme rho + tiny sigma -> an unrealistically kinked smile that
+    # should fail the Breeden-Litzenberger density-positivity check.
+    spot, rate, t_years = 100.0, 0.03, 0.5
+    svi = SVISlice(a=0.01, b=3.0, rho=-0.95, m=0.0, sigma=0.02, t=t_years)
+
+    result = svi_butterfly_arbitrage_check(svi, spot=spot, rate=rate)
+    assert not result["arbitrage_free"]
+    assert result["min_density"] < 0

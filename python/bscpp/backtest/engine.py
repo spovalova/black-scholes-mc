@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+import numpy as np
 import pandas as pd
 
 import bscpp
@@ -64,57 +65,59 @@ class StripPricer:
 
         chain["mid"] = chain[["bid", "ask"]].mean(axis=1)
         chain["mid"] = chain["mid"].fillna(chain["last"])
+        otypes = chain["type"].where(chain["type"] == "call", "put").tolist()
 
-        model_ivs, bs_prices = [], []
-        deltas, gammas, vegas, thetas, rhos = [], [], [], [], []
-        mc_prices, mc_errs = [], []
+        # --- resolve one implied vol per contract, batching the solver call ---
+        # rows that already carry a usable quoted IV skip the solve entirely;
+        # everything else is solved in a single C++ call rather than one
+        # Python->C++ crossing per contract.
+        given_iv = chain["implied_volatility"].to_numpy(dtype=float)
+        mid = chain["mid"].to_numpy(dtype=float)
+        needs_solve = ~np.isfinite(given_iv) | (given_iv <= 0)
+        has_mid = np.isfinite(mid) & (mid > 0)
+        solve_mask = needs_solve & has_mid
+        # rows in needs_solve & ~has_mid have neither a quote nor a usable
+        # mid to solve from; they keep the 0.20 placeholder below.
 
-        for _, row in chain.iterrows():
-            otype = "call" if row["type"] == "call" else "put"
-            iv = row.get("implied_volatility")
+        model_ivs = np.where(needs_solve, 0.20, given_iv)  # placeholder for solved/fallback rows
+        if solve_mask.any():
+            idx = np.flatnonzero(solve_mask)
+            seed_inputs = [
+                bscpp.make_inputs(spot, chain["strike"].iat[i], self.rate, 0.20, t_years,
+                                   otypes[i], self.dividend_yield)
+                for i in idx
+            ]
+            solved = bscpp.bs_implied_vol_batch(seed_inputs, [mid[i] for i in idx])
+            for i, iv in zip(idx, solved):
+                model_ivs[i] = iv if iv == iv else 0.20  # NaN check -> fallback
 
-            if iv is None or pd.isna(iv) or iv <= 0:
-                mid = row["mid"]
-                if mid and mid > 0:
-                    seed_inputs = bscpp.make_inputs(
-                        spot, row["strike"], self.rate, 0.20, t_years, otype, self.dividend_yield
-                    )
-                    solved = bscpp.bs_implied_vol(seed_inputs, mid)
-                    iv = solved if solved == solved else 0.20  # NaN check
-                else:
-                    iv = 0.20
-            model_ivs.append(iv)
+        # --- batch price + Greeks for the whole chain in one C++ call ---
+        inputs_list = [
+            bscpp.make_inputs(spot, chain["strike"].iat[i], self.rate, model_ivs[i], t_years,
+                               otypes[i], self.dividend_yield)
+            for i in range(len(chain))
+        ]
+        results = bscpp.bs_price_with_greeks_batch(inputs_list)
 
-            inputs = bscpp.make_inputs(
-                spot, row["strike"], self.rate, iv, t_years, otype, self.dividend_yield
-            )
-            result = bscpp.bs_price_with_greeks(inputs)
-            bs_prices.append(result.price)
-            deltas.append(result.greeks.delta)
-            gammas.append(result.greeks.gamma)
-            vegas.append(result.greeks.vega)
-            thetas.append(result.greeks.theta)
-            rhos.append(result.greeks.rho)
-
-            if use_mc:
-                mc_result = self.mc.price_european(inputs, self.mc_paths, True)
-                mc_prices.append(mc_result.price)
-                mc_errs.append(mc_result.std_error)
-            else:
-                mc_prices.append(float("nan"))
-                mc_errs.append(float("nan"))
+        if use_mc:
+            mc_results = [self.mc.price_european(inp, self.mc_paths, True) for inp in inputs_list]
+            mc_prices = [r.price for r in mc_results]
+            mc_errs = [r.std_error for r in mc_results]
+        else:
+            mc_prices = [float("nan")] * len(chain)
+            mc_errs = [float("nan")] * len(chain)
 
         chain["spot"] = spot
         chain["T"] = t_years
         chain["model_iv"] = model_ivs
-        chain["bs_price"] = bs_prices
+        chain["bs_price"] = [r.price for r in results]
         chain["mc_price"] = mc_prices
         chain["mc_std_error"] = mc_errs
-        chain["delta"] = deltas
-        chain["gamma"] = gammas
-        chain["vega"] = vegas
-        chain["theta"] = thetas
-        chain["rho"] = rhos
+        chain["delta"] = [r.greeks.delta for r in results]
+        chain["gamma"] = [r.greeks.gamma for r in results]
+        chain["vega"] = [r.greeks.vega for r in results]
+        chain["theta"] = [r.greeks.theta for r in results]
+        chain["rho"] = [r.greeks.rho for r in results]
         chain["bs_error_vs_market"] = chain["bs_price"] - chain["mid"]
         chain["bs_error_pct"] = chain["bs_error_vs_market"] / chain["mid"]
 

@@ -53,6 +53,12 @@ def main():
     print(f"\nFinal hedging P&L (short {strike} {args.option_type}, "
           f"hedged daily at {args.hedge_vol:.0%} vol): {result['portfolio_value'].iloc[-1]:.2f}")
 
+    attributed = backtester.attribute_pnl(result)
+    print("\nP&L attribution (financing + gamma + theta; see HedgingBacktester.attribute_pnl):")
+    totals = attributed[["financing_pnl", "gamma_pnl", "theta_pnl", "predicted_pnl",
+                          "realized_pnl", "attribution_error"]].sum()
+    print(totals.to_string())
+
 
 if __name__ == "__main__":
     main()

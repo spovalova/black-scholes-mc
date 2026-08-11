@@ -72,6 +72,7 @@ class HedgingBacktester:
 
         rows = [{
             "date": dates[0], "spot": spot0, "T": t0, "delta": shares,
+            "gamma": result0.greeks.gamma, "theta": result0.greeks.theta,
             "option_value": result0.price, "cash": cash, "shares": shares,
             "portfolio_value": cash + shares * spot0 - result0.price,
         }]
@@ -87,23 +88,77 @@ class HedgingBacktester:
                 payoff = max(spot - strike, 0.0) if option_type == "call" else max(strike - spot, 0.0)
                 cash += shares * spot  # liquidate the hedge; the unified formula
                 shares, option_value = 0.0, payoff  # below nets out -option_value (=payoff) once
+                gamma, theta = 0.0, 0.0  # degenerate at expiry; unused past this row anyway
             else:
                 inputs = bscpp.make_inputs(spot, strike, self.rate, hedge_vol, t, option_type,
                                             self.dividend_yield)
                 result = bscpp.bs_price_with_greeks(inputs)
                 option_value = result.price
                 new_delta = result.greeks.delta
+                gamma, theta = result.greeks.gamma, result.greeks.theta
                 cash -= (new_delta - shares) * spot  # buy/sell the delta change
                 shares = new_delta
 
             portfolio_value = cash + shares * spot - option_value
             rows.append({
                 "date": date, "spot": spot, "T": t, "delta": shares,
+                "gamma": gamma, "theta": theta,
                 "option_value": option_value, "cash": cash, "shares": shares,
                 "portfolio_value": portfolio_value,
             })
 
         return pd.DataFrame(rows)
+
+    def attribute_pnl(self, result: pd.DataFrame) -> pd.DataFrame:
+        """Decompose each day's realized hedging P&L into financing + gamma + theta.
+
+        Derivation (short 1 option, hedged with `shares` = option delta,
+        cash growing at `rate`, rebalanced once per row): writing
+        Pi = cash + shares*S - V and expanding the discrete update,
+
+            dPi = cash_prev*(e^{r dt} - 1) + shares_prev*dS - dV
+
+        Second-order Taylor expanding dV of the *same* pricing function
+        (constant hedge_vol) around the prior state,
+
+            dV ~= delta_prev*dS + 0.5*gamma_prev*dS^2 + theta_prev*dt
+
+        and substituting (shares_prev == delta_prev by construction) gives
+
+            dPi ~= cash_prev*(e^{r dt} - 1) - 0.5*gamma_prev*dS^2 - theta_prev*dt
+
+        i.e. financing + a pure "gamma P&L" term + a pure "theta P&L" term.
+        For a short option this is the textbook result: theta_prev < 0 for a
+        long option means -theta_prev*dt > 0 -- the short seller collects
+        time decay -- while -0.5*gamma_prev*dS^2 <= 0 always -- the short
+        seller pays for realized convexity. `attribution_error` is the
+        Taylor-expansion residual (higher-order terms + discrete-vs-
+        continuous rebalancing effects); it should be small relative to the
+        other terms for daily steps on typical single-name vol.
+        """
+        df = result.reset_index(drop=True).copy()
+        n = len(df)
+        realized = np.zeros(n)
+        financing = np.zeros(n)
+        gamma_pnl = np.zeros(n)
+        theta_pnl = np.zeros(n)
+
+        for i in range(1, n):
+            elapsed_days = (df["date"].iat[i] - df["date"].iat[i - 1]).days or 1
+            dt_years = elapsed_days / 365.0
+            realized[i] = df["portfolio_value"].iat[i] - df["portfolio_value"].iat[i - 1]
+            financing[i] = df["cash"].iat[i - 1] * (math.exp(self.rate * dt_years) - 1.0)
+            d_spot = df["spot"].iat[i] - df["spot"].iat[i - 1]
+            gamma_pnl[i] = -0.5 * df["gamma"].iat[i - 1] * d_spot ** 2
+            theta_pnl[i] = -df["theta"].iat[i - 1] * dt_years
+
+        df["realized_pnl"] = realized
+        df["financing_pnl"] = financing
+        df["gamma_pnl"] = gamma_pnl
+        df["theta_pnl"] = theta_pnl
+        df["predicted_pnl"] = df["financing_pnl"] + df["gamma_pnl"] + df["theta_pnl"]
+        df["attribution_error"] = df["realized_pnl"] - df["predicted_pnl"]
+        return df
 
 
 def realized_vs_implied_experiment(

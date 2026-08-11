@@ -79,6 +79,31 @@ PricingResult BlackScholes::price_with_greeks(const MarketInputs& in) {
     return r;
 }
 
+std::vector<PricingResult> BlackScholes::price_with_greeks_batch(
+    const std::vector<MarketInputs>& inputs) {
+    std::vector<PricingResult> out;
+    out.reserve(inputs.size());
+    for (const auto& in : inputs) {
+        out.push_back(price_with_greeks(in));
+    }
+    return out;
+}
+
+std::vector<double> BlackScholes::implied_vol_batch(const std::vector<MarketInputs>& inputs,
+                                                      const std::vector<double>& market_prices,
+                                                      double initial_guess, int max_iter,
+                                                      double tol) {
+    if (inputs.size() != market_prices.size()) {
+        throw std::invalid_argument("inputs and market_prices must be the same length");
+    }
+    std::vector<double> out;
+    out.reserve(inputs.size());
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        out.push_back(implied_vol(inputs[i], market_prices[i], initial_guess, max_iter, tol));
+    }
+    return out;
+}
+
 double BlackScholes::implied_vol(const MarketInputs& in, double market_price,
                                   double initial_guess, int max_iter, double tol) {
     MarketInputs work = in;

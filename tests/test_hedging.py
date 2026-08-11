@@ -1,4 +1,5 @@
 import datetime as dt
+import math
 
 import numpy as np
 import pandas as pd
@@ -26,6 +27,32 @@ def test_hedging_pnl_flat_path_is_near_zero_net_of_rates():
     result = backtester.run(prices, strike=100, expiration=dates[-1].date(), hedge_vol=0.2,
                              option_type="call")
     assert abs(result["portfolio_value"].iloc[-1]) < 5.0
+
+
+def test_pnl_attribution_sums_to_realized_and_is_a_good_approximation():
+    rng = np.random.default_rng(11)
+    dates = pd.date_range(dt.date.today(), periods=60, freq="D")
+    vol = 0.35
+    dt_frac = 1 / 365
+    rets = rng.normal((0.05 - 0.5 * vol**2) * dt_frac, vol * np.sqrt(dt_frac), size=59)
+    path = 100 * np.exp(np.concatenate([[0], np.cumsum(rets)]))
+    prices = pd.Series(path, index=dates)
+
+    backtester = HedgingBacktester(rate=0.05)
+    result = backtester.run(prices, strike=100, expiration=dates[-1].date(), hedge_vol=vol,
+                             option_type="call")
+    attributed = backtester.attribute_pnl(result)
+
+    # the decomposition is an exact accounting identity by construction:
+    # sum of daily realized P&L must equal the final cumulative P&L.
+    assert math.isclose(attributed["realized_pnl"].sum(), result["portfolio_value"].iloc[-1],
+                         abs_tol=1e-6)
+
+    # the Taylor-expansion approximation (financing + gamma + theta) should
+    # explain most of the realized P&L, with a modest higher-order residual.
+    total_abs_realized = attributed["realized_pnl"].abs().sum()
+    total_abs_error = attributed["attribution_error"].abs().sum()
+    assert total_abs_error < 0.5 * total_abs_realized
 
 
 def test_realized_vs_implied_pnl_sign_matches_theory():

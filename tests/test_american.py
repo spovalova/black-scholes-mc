@@ -19,6 +19,16 @@ def test_american_put_has_early_exercise_premium():
     assert amer.price > euro
 
 
+def test_lsm_std_error_shrinks_with_more_paths():
+    small = bscpp.AmericanPricer(seed=1).price(
+        bscpp.make_inputs(36, 40, 0.06, 0.2, 1.0, "put"), 5_000, 50)
+    large = bscpp.AmericanPricer(seed=1).price(
+        bscpp.make_inputs(36, 40, 0.06, 0.2, 1.0, "put"), 80_000, 50)
+    # 16x the paths should meaningfully shrink the standard error (loose
+    # bound vs. the pure-MC 4x since LSM's regression step adds its own noise).
+    assert small.std_error > 2.0 * large.std_error
+
+
 def test_american_put_matches_longstaff_schwartz_2001_benchmark():
     # S0=36, K=40, r=6%, sigma=20%, T=1y is the headline example from
     # Longstaff & Schwartz (2001), "Valuing American Options by Simulation:

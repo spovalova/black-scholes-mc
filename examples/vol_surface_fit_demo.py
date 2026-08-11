@@ -12,7 +12,14 @@ import datetime as dt
 
 import numpy as np
 
-from bscpp.backtest import MockProvider, StripPricer, fit_svi_slice, svi_fit_rmse
+from bscpp.backtest import (
+    MockProvider,
+    StripPricer,
+    fit_svi_slice,
+    svi_butterfly_arbitrage_check,
+    svi_fit_rmse,
+    svi_min_total_variance,
+)
 
 
 def main():
@@ -29,7 +36,12 @@ def main():
 
     print(f"SVI fit ({len(calls)} call strikes, T={t_years:.3f}y):")
     print(f"  a={svi.a:.5f}  b={svi.b:.5f}  rho={svi.rho:.4f}  m={svi.m:.4f}  sigma={svi.sigma:.4f}")
-    print(f"  fit RMSE: {rmse * 100:.2f} vol points\n")
+    print(f"  fit RMSE: {rmse * 100:.2f} vol points")
+
+    print(f"  min total variance: {svi_min_total_variance(svi):.5f} (must be >= 0)")
+    arb = svi_butterfly_arbitrage_check(svi, spot=450.0, rate=0.05)
+    print(f"  Breeden-Litzenberger butterfly check: min density = {arb['min_density']:.6f} "
+          f"-> {'arbitrage-free' if arb['arbitrage_free'] else 'ARBITRAGE VIOLATION'}\n")
 
     print(f"{'strike':>8} {'market_iv':>10} {'svi_iv':>10}")
 

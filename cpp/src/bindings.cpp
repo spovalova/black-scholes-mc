@@ -1,4 +1,5 @@
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 
 #include "bscpp/black_scholes.hpp"
 #include "bscpp/longstaff_schwartz.hpp"
@@ -70,8 +71,14 @@ PYBIND11_MODULE(_core, m) {
     m.def("bs_price", &BlackScholes::price, py::arg("inputs"));
     m.def("bs_greeks", &BlackScholes::greeks, py::arg("inputs"));
     m.def("bs_price_with_greeks", &BlackScholes::price_with_greeks, py::arg("inputs"));
+    m.def("bs_price_with_greeks_batch", &BlackScholes::price_with_greeks_batch, py::arg("inputs"),
+          "Price + Greeks for a list of MarketInputs in one C++ call (avoids per-contract "
+          "Python<->C++ crossing overhead when pricing a whole chain).");
     m.def("bs_implied_vol", &BlackScholes::implied_vol, py::arg("inputs"), py::arg("market_price"),
           py::arg("initial_guess") = 0.2, py::arg("max_iter") = 100, py::arg("tol") = 1e-8);
+    m.def("bs_implied_vol_batch", &BlackScholes::implied_vol_batch, py::arg("inputs"),
+          py::arg("market_prices"), py::arg("initial_guess") = 0.2, py::arg("max_iter") = 100,
+          py::arg("tol") = 1e-8);
 
     py::class_<MonteCarloPricer>(m, "MonteCarloPricer")
         .def(py::init<std::uint64_t>(), py::arg("seed") = 42)
