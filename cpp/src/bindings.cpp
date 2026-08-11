@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 
 #include "bscpp/black_scholes.hpp"
+#include "bscpp/longstaff_schwartz.hpp"
 #include "bscpp/monte_carlo.hpp"
 #include "bscpp/types.hpp"
 
@@ -78,4 +79,10 @@ PYBIND11_MODULE(_core, m) {
              py::arg("num_paths"), py::arg("antithetic") = true)
         .def("greeks_european", &MonteCarloPricer::greeks_european, py::arg("inputs"),
              py::arg("num_paths"), py::arg("antithetic") = true, py::arg("bump_frac") = 0.01);
+
+    py::class_<AmericanPricer>(m, "AmericanPricer")
+        .def(py::init<std::uint64_t>(), py::arg("seed") = 42)
+        .def("price", &AmericanPricer::price, py::arg("inputs"), py::arg("num_paths"),
+             py::arg("num_steps"), py::arg("poly_degree") = 2,
+             "American-style option price via Longstaff-Schwartz least-squares Monte Carlo.");
 }

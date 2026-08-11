@@ -48,6 +48,10 @@ class DataProvider(ABC):
     ) -> pd.DataFrame:
         """Option chain slice for one expiration, columns per CHAIN_COLUMNS."""
 
+    @abstractmethod
+    def get_price_history(self, ticker: str, start: dt.date, end: dt.date) -> pd.Series:
+        """Daily close prices for the underlying over [start, end], indexed by date."""
+
 
 class PolygonProvider(DataProvider):
     """Polygon.io-backed provider.
@@ -122,6 +126,22 @@ class PolygonProvider(DataProvider):
             return pd.DataFrame(columns=CHAIN_COLUMNS)
         return pd.DataFrame(rows)[CHAIN_COLUMNS]
 
+    def get_price_history(self, ticker: str, start: dt.date, end: dt.date) -> pd.Series:
+        # Daily aggregates (/v2/aggs) are available on Polygon's base equities
+        # tier -- unlike the options chain endpoints above, this does not
+        # require "Options Starter" or higher.
+        path = f"/v2/aggs/ticker/{ticker}/range/1/day/{start.isoformat()}/{end.isoformat()}"
+        data = self._get(path, params={"adjusted": "true", "sort": "asc", "limit": 50000})
+        results = data.get("results", [])
+        if not results:
+            return pd.Series(dtype=float, name="close")
+
+        idx = [
+            dt.datetime.fromtimestamp(r["t"] / 1000, tz=dt.timezone.utc).date() for r in results
+        ]
+        closes = [r["c"] for r in results]
+        return pd.Series(closes, index=pd.DatetimeIndex(idx), name="close")
+
 
 class MockProvider(DataProvider):
     """Synthetic provider for exercising the pipeline without a data key.
@@ -139,6 +159,7 @@ class MockProvider(DataProvider):
         smile_strength: float = 0.35,
         rate: float = 0.05,
         dividend_yield: float = 0.0,
+        realized_vol: float | None = None,
         seed: int = 7,
     ):
         self.spot = spot
@@ -146,6 +167,11 @@ class MockProvider(DataProvider):
         self.smile_strength = smile_strength
         self.rate = rate
         self.dividend_yield = dividend_yield
+        # The underlying's *actual* realized diffusion vol, independent of
+        # the (smiled) implied vol quoted in the option chain. Set this
+        # different from base_vol to see the realized-vs-implied vol gap
+        # show up as delta-hedging P&L in HedgingBacktester.
+        self.realized_vol = realized_vol if realized_vol is not None else base_vol
         self._rng = np.random.default_rng(seed)
 
     def get_underlying_price(self, ticker: str, as_of: dt.date | None = None) -> float:
@@ -193,3 +219,29 @@ class MockProvider(DataProvider):
                 )
 
         return pd.DataFrame(rows)[CHAIN_COLUMNS]
+
+    def get_price_history(self, ticker: str, start: dt.date, end: dt.date) -> pd.Series:
+        """Simulate a daily-close GBM path at `realized_vol`, ending at `spot`.
+
+        Anchoring the path to end at self.spot (rather than starting there)
+        keeps get_underlying_price() and this history mutually consistent
+        for a HedgingBacktester run that treats "today" as as_of=end.
+        """
+        n_days = (end - start).days + 1
+        if n_days < 2:
+            return pd.Series([self.spot], index=pd.DatetimeIndex([end]), name="close")
+
+        dt_frac = 1.0 / 365.0
+        log_returns = self._rng.normal(
+            (self.rate - 0.5 * self.realized_vol**2) * dt_frac,
+            self.realized_vol * np.sqrt(dt_frac),
+            size=n_days - 1,
+        )
+        # Build forward from an arbitrary start, then rescale so the path
+        # lands exactly on self.spot at `end`.
+        log_path = np.concatenate([[0.0], np.cumsum(log_returns)])
+        path = np.exp(log_path)
+        path *= self.spot / path[-1]
+
+        dates = pd.date_range(start, end, freq="D")
+        return pd.Series(path, index=dates, name="close")
