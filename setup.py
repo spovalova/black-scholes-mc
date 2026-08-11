@@ -9,6 +9,7 @@ ext_modules = [
             "cpp/src/black_scholes.cpp",
             "cpp/src/monte_carlo.cpp",
             "cpp/src/longstaff_schwartz.cpp",
+            "cpp/src/heston.cpp",
         ],
         include_dirs=["cpp/include"],
         cxx_std=17,

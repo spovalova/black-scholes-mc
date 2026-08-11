@@ -16,6 +16,7 @@ cpp/                          C++ core
     black_scholes.hpp           analytic BS pricer, Greeks, IV solver, batch variants
     monte_carlo.hpp              European MC pricer (antithetic + CRN Greeks)
     longstaff_schwartz.hpp        American MC pricer (LSM regression)
+    heston.hpp                     Heston stochastic-vol semi-analytic + MC pricer
   src/                          implementations + pybind11 bindings
 
 python/bscpp/                 Python package (imports the compiled extension)
@@ -27,8 +28,9 @@ python/bscpp/                 Python package (imports the compiled extension)
     engine.py                    StripPricer / Backtester -- chain pricing vs. market
     hedging.py                   HedgingBacktester -- delta-hedging P&L + attribution
     vol_surface.py                SVI fitting + Breeden-Litzenberger arbitrage checks
+    heston_calibration.py          fits Heston params to a chain's implied vols
 
-tests/                        pytest suite (28 tests): closed-form benchmarks,
+tests/                        pytest suite (34 tests): closed-form benchmarks,
                                convergence behavior, arbitrage-free checks,
                                accounting-identity checks, backtest plumbing
 examples/                     runnable demos -- all but run_backtest.py (non-mock)
@@ -112,6 +114,42 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   solve implied vol per contract (batched), price with both BS and MC, and
   report theoretical price vs. observed market mid plus full Greeks.
 
+**Heston stochastic volatility** (`bscpp.heston_price`, `bscpp.backtest.heston_calibration`)
+- Semi-analytic pricer via the Heston (1993) characteristic function, using
+  the Albrecher, Mayer, Schoutens & Tistaert (2007) **"Little Trap"**
+  reformulation -- the original formula has a branch-cut discontinuity in
+  its complex logarithm that silently produces wrong prices for some
+  parameter/maturity combinations, which is exactly the kind of bug that's
+  invisible unless you specifically check for it.
+- An independent **Monte Carlo pricer** (full-truncation Euler scheme for
+  the CIR variance process) exists specifically to cross-check the
+  characteristic-function formula against a from-scratch simulation, not
+  just to be a second pricing option. This project does not trust a
+  memorized complex-analysis formula on its own: verified three ways --
+  (1) collapses cleanly to Black-Scholes as vol-of-vol -> 0 (monotonic
+  convergence, the sharpest test of a sign/branch-cut error), (2) agrees
+  with the independent MC engine within a few standard errors across
+  strikes, option types, and a Feller-condition-violating stress case,
+  (3) exact put-call parity.
+- `calibrate_heston`: fits (kappa, theta, xi, rho, v0) to a chain's implied
+  vols via `scipy.optimize.least_squares`, calibrating in **IV space**
+  rather than raw price space (price-space residuals are dominated by deep
+  ITM contracts whose price is nearly pure intrinsic value and barely
+  moves with the vol parameters -- the OTM wings, where the actual vol
+  information lives, would be underweighted). Validated by recovering a
+  known synthetic Heston smile to <1e-3 RMSE.
+- Heston has a well-known parameter identifiability issue -- different
+  parameter vectors can produce near-identical smiles, especially for
+  short-dated, mildly-curved data, where `v0` is poorly pinned down
+  independent of `theta`/`kappa`. `heston_calibration_demo.py` shows this
+  happening on real (synthetic) data rather than pretending it doesn't
+  exist: v0 lands at its bound while fit quality stays good -- the honest
+  lesson being that low RMSE doesn't mean every parameter is well-identified.
+- `heston_satisfies_feller_condition`: checks `2*kappa*theta >= xi^2`
+  (keeps the variance process a.s. positive) as a diagnostic -- many
+  market-calibrated fits violate it in practice, which is itself a useful
+  thing to know about a calibration, not a hard failure.
+
 **Trading-desk Greeks** (`bscpp.trading_greeks`)
 - The raw Greeks are calculus derivatives: vega/rho per 1.00 (100 points)
   of vol/rate, theta per *year*. No desk quotes them that way. This is a
@@ -119,12 +157,12 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   mixing the two conventions is a classic, costly mistake for anyone new
   to reading options risk.
 
-**Deliberately out of scope** (documented, not silently missing):
-stochastic vol / local vol models (Heston, SABR), a full historical
-options-tick database integration, and a full backtest P&L simulation of
-*multi-leg* strategies over time (the hedging backtest covers single-leg
-positions; extending `HedgingBacktester` to net multi-leg Greeks is a
-natural next step on top of `strategies.py`).
+**Deliberately out of scope** (documented, not silently missing): local vol
+(Dupire) and other stochastic vol models beyond Heston (SABR, rough vol), a
+full historical options-tick database integration, and a full backtest P&L
+simulation of *multi-leg* strategies over time (the hedging backtest covers
+single-leg positions; extending `HedgingBacktester` to net multi-leg Greeks
+is a natural next step on top of `strategies.py`).
 
 ## Setup
 
@@ -147,6 +185,7 @@ python examples/american_pricing_demo.py     # European vs. American (LSM) prici
 python examples/strategy_demo.py               # straddle/strangle/vertical/strip/strap/butterfly
 python examples/hedging_pnl_experiment.py       # realized-vs-implied vol P&L sweep
 python examples/vol_surface_fit_demo.py         # SVI fit + arbitrage check on a synthetic smile
+python examples/heston_calibration_demo.py       # Heston calibration vs. SVI on the same chain
 python examples/run_backtest.py --mock --ticker SPY   # full chain-pricing pipeline
 ```
 
@@ -228,6 +267,10 @@ desk_greeks = bscpp.trading_greeks(greeks)  # vega/rho per 1%, theta per day
 mc = bscpp.price_mc(spot=100, strike=100, rate=0.05, vol=0.2, maturity=1.0, num_paths=200_000)
 am = bscpp.price_american(36, 40, 0.06, 0.2, 1.0, "put", num_paths=100_000, num_steps=50)
 
+# Heston stochastic vol (semi-analytic; HestonMCPricer for the independent MC cross-check)
+hp = bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)
+heston_price = bscpp.heston_price(100, 100, 0.05, 0.0, 1.0, bscpp.OptionType.Call, hp)
+
 # Multi-leg strategies
 strat_pricer = bscpp.StrategyPricer(rate=0.05)
 result = strat_pricer.price(bscpp.straddle(strike=100), spot=100, vol=0.2, maturity=1.0)
@@ -237,7 +280,7 @@ plot_df, breakevens = strat_pricer.payoff_diagram(bscpp.straddle(strike=100), sp
 ```python
 from bscpp.backtest import (
     MockProvider, StripPricer, HedgingBacktester,
-    fit_svi_slice, svi_butterfly_arbitrage_check,
+    fit_svi_slice, svi_butterfly_arbitrage_check, calibrate_heston,
 )
 
 provider = MockProvider(spot=450.0, base_vol=0.18)
@@ -246,6 +289,9 @@ chain = pricer.price_strip("SPY", expiration, strike_range=(0.9, 1.1))
 
 svi = fit_svi_slice(chain["strike"], chain["model_iv"], spot=450.0, t_years=chain["T"].iloc[0])
 arb = svi_butterfly_arbitrage_check(svi, spot=450.0, rate=0.05)
+
+heston = calibrate_heston(chain["strike"], chain["type"], chain["model_iv"],
+                           spot=450.0, t_years=chain["T"].iloc[0], rate=0.05)
 
 hedger = HedgingBacktester(rate=0.05)
 result = hedger.run(price_history, strike=450, expiration=expiration, hedge_vol=0.18)

@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 
 #include "bscpp/black_scholes.hpp"
+#include "bscpp/heston.hpp"
 #include "bscpp/longstaff_schwartz.hpp"
 #include "bscpp/monte_carlo.hpp"
 #include "bscpp/types.hpp"
@@ -92,4 +93,32 @@ PYBIND11_MODULE(_core, m) {
         .def("price", &AmericanPricer::price, py::arg("inputs"), py::arg("num_paths"),
              py::arg("num_steps"), py::arg("poly_degree") = 2,
              "American-style option price via Longstaff-Schwartz least-squares Monte Carlo.");
+
+    py::class_<HestonParams>(m, "HestonParams")
+        .def(py::init([](double kappa, double theta, double xi, double rho, double v0) {
+                 return HestonParams{kappa, theta, xi, rho, v0};
+             }),
+             py::arg("kappa"), py::arg("theta"), py::arg("xi"), py::arg("rho"), py::arg("v0"))
+        .def_readwrite("kappa", &HestonParams::kappa)
+        .def_readwrite("theta", &HestonParams::theta)
+        .def_readwrite("xi", &HestonParams::xi)
+        .def_readwrite("rho", &HestonParams::rho)
+        .def_readwrite("v0", &HestonParams::v0)
+        .def("__repr__", [](const HestonParams& p) {
+            return "HestonParams(kappa=" + std::to_string(p.kappa) +
+                   ", theta=" + std::to_string(p.theta) + ", xi=" + std::to_string(p.xi) +
+                   ", rho=" + std::to_string(p.rho) + ", v0=" + std::to_string(p.v0) + ")";
+        });
+
+    m.def("heston_price", &HestonPricer::price, py::arg("spot"), py::arg("strike"),
+          py::arg("rate"), py::arg("dividend_yield"), py::arg("maturity"), py::arg("type"),
+          py::arg("params"));
+    m.def("heston_satisfies_feller_condition", &HestonPricer::satisfies_feller_condition,
+          py::arg("params"));
+
+    py::class_<HestonMCPricer>(m, "HestonMCPricer")
+        .def(py::init<std::uint64_t>(), py::arg("seed") = 42)
+        .def("price", &HestonMCPricer::price, py::arg("spot"), py::arg("strike"), py::arg("rate"),
+             py::arg("dividend_yield"), py::arg("maturity"), py::arg("type"), py::arg("params"),
+             py::arg("num_paths"), py::arg("num_steps"));
 }

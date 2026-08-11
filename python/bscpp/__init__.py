@@ -3,6 +3,8 @@
 from bscpp._core import (
     AmericanPricer,
     Greeks,
+    HestonMCPricer,
+    HestonParams,
     MarketInputs,
     MCResult,
     MonteCarloPricer,
@@ -14,6 +16,8 @@ from bscpp._core import (
     bs_price,
     bs_price_with_greeks,
     bs_price_with_greeks_batch,
+    heston_price,
+    heston_satisfies_feller_condition,
 )
 from bscpp.strategies import (
     Leg,
@@ -42,6 +46,10 @@ __all__ = [
     "bs_price",
     "bs_price_with_greeks",
     "bs_price_with_greeks_batch",
+    "HestonMCPricer",
+    "HestonParams",
+    "heston_price",
+    "heston_satisfies_feller_condition",
     "make_inputs",
     "price",
     "price_mc",
