@@ -19,6 +19,7 @@ from bscpp._core import (
     heston_price,
     heston_satisfies_feller_condition,
 )
+from bscpp.risk import Breach, Position, PortfolioRiskManager, RiskLimits
 from bscpp.strategies import (
     Leg,
     StrategyPricer,
@@ -65,6 +66,10 @@ __all__ = [
     "strip",
     "vertical_spread",
     "trading_greeks",
+    "Breach",
+    "Position",
+    "PortfolioRiskManager",
+    "RiskLimits",
 ]
 
 
@@ -125,14 +130,20 @@ def price_mc(spot, strike, rate, vol, maturity, option_type="call", dividend_yie
 
 
 def price_american(spot, strike, rate, vol, maturity, option_type="put", dividend_yield=0.0,
-                    num_paths=50_000, num_steps=50, poly_degree=2, seed=42):
+                    num_paths=50_000, num_steps=50, poly_degree=2, seed=42,
+                    num_calibration_paths=0):
     """American-style price via Longstaff-Schwartz LSM; returns MCResult(price, std_error).
 
     Early exercise only carries value for puts (or calls with dividends);
     an American call with no dividends will price essentially identically
     to the European Black-Scholes call -- that equivalence is itself a
     useful sanity check (see tests/test_american.py).
+
+    Regresses the exercise policy on an independently-seeded calibration
+    path set (num_calibration_paths, defaults to num_paths) and applies it
+    to a separate pricing path set -- avoids the small upward look-ahead
+    bias of regressing and pricing on the same paths.
     """
     inputs = make_inputs(spot, strike, rate, vol, maturity, option_type, dividend_yield)
     lsm = AmericanPricer(seed=seed)
-    return lsm.price(inputs, num_paths, num_steps, poly_degree)
+    return lsm.price(inputs, num_paths, num_steps, poly_degree, num_calibration_paths)

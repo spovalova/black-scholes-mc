@@ -14,14 +14,15 @@ namespace bscpp {
 // spot price to estimate E[continuation | S_t], and exercising whenever
 // immediate exercise beats that estimate.
 //
-// Known limitation, confirmed against QuantLib's MCLongstaffSchwartzEngine:
-// this regresses and prices along the SAME path set. QuantLib deliberately
-// uses a separately-seeded calibration path set specifically to avoid this;
-// the shared-path-set approach has a known small upward (look-ahead) bias,
-// asymptotically proportional to the regressors-to-paths ratio. With the
-// path counts this project defaults to (tens of thousands of paths against
-// 3-4 regressors) the bias should be small -- consistent with the
-// benchmark test passing -- but it is not eliminated the way QuantLib's is.
+// Uses TWO independently-seeded path sets, matching QuantLib's
+// MCLongstaffSchwartzEngine: a calibration set (fits the regression
+// coefficients per exercise date, backward pass) and a separate pricing
+// set (applies those fixed coefficients forward, deciding exercise as it
+// goes). Regressing and pricing on the *same* path set is a known source
+// of small upward look-ahead bias; QuantLib avoids it with a
+// separately-seeded calibration set (seed + 1768237423, literally copied
+// from QuantLib's own offset choice, of no significance beyond "a large
+// arbitrary constant") and this class does the same.
 class AmericanPricer {
 public:
     explicit AmericanPricer(std::uint64_t seed = 42);
@@ -34,12 +35,18 @@ public:
     // default LSM engine uses the same combination (Monomial basis, degree
     // 2, S/strike normalization) for the same numerical-conditioning
     // reason. It only becomes a real problem at higher polynomial degree.
-    MCResult price(const MarketInputs& in, long num_paths, int num_steps, int poly_degree = 2);
+    // num_calibration_paths defaults to num_paths if left at 0.
+    MCResult price(const MarketInputs& in, long num_paths, int num_steps, int poly_degree = 2,
+                    long num_calibration_paths = 0);
 
-private:
+    // Public: shared by the free-function calibration helper in the .cpp
+    // (which operates on a plain path matrix, not an AmericanPricer
+    // instance) as well as by price() itself.
     static double payoff(double s, double strike, OptionType type);
 
-    std::mt19937_64 rng_;
+private:
+    std::mt19937_64 rng_;              // pricing path set
+    std::mt19937_64 rng_calibration_;  // independently-seeded calibration path set
 };
 
 }  // namespace bscpp

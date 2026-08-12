@@ -24,6 +24,8 @@ def parse_args():
                     help="constant vol used to compute BS deltas each day")
     p.add_argument("--rate", type=float, default=0.05)
     p.add_argument("--option-type", choices=["call", "put"], default="call")
+    p.add_argument("--transaction-cost-bps", type=float, default=5.0,
+                    help="cost of crossing the spread on each rebalance, in bps of trade notional")
     return p.parse_args()
 
 
@@ -43,20 +45,24 @@ def main():
     expiration = history.index[-1].date()
 
     print(f"{args.ticker}: {len(history)} closes, {history.index[0].date()} -> {expiration}")
-    print(f"Spot at inception: {spot0:.2f}, strike: {strike}, hedge_vol: {args.hedge_vol}\n")
+    print(f"Spot at inception: {spot0:.2f}, strike: {strike}, hedge_vol: {args.hedge_vol}, "
+          f"transaction_cost_bps: {args.transaction_cost_bps}\n")
 
-    backtester = HedgingBacktester(rate=args.rate)
+    backtester = HedgingBacktester(rate=args.rate, transaction_cost_bps=args.transaction_cost_bps)
     result = backtester.run(history, strike=strike, expiration=expiration,
                              hedge_vol=args.hedge_vol, option_type=args.option_type)
 
-    print(result[["date", "spot", "delta", "option_value", "portfolio_value"]].to_string(index=False))
+    print(result[["date", "spot", "delta", "option_value", "transaction_cost",
+                   "portfolio_value"]].to_string(index=False))
     print(f"\nFinal hedging P&L (short {strike} {args.option_type}, "
           f"hedged daily at {args.hedge_vol:.0%} vol): {result['portfolio_value'].iloc[-1]:.2f}")
+    print(f"Total transaction costs paid: {result['transaction_cost'].sum():.2f}")
 
     attributed = backtester.attribute_pnl(result)
-    print("\nP&L attribution (financing + gamma + theta; see HedgingBacktester.attribute_pnl):")
-    totals = attributed[["financing_pnl", "gamma_pnl", "theta_pnl", "predicted_pnl",
-                          "realized_pnl", "attribution_error"]].sum()
+    print("\nP&L attribution (financing + gamma + theta + transaction cost; "
+          "see HedgingBacktester.attribute_pnl):")
+    totals = attributed[["financing_pnl", "gamma_pnl", "theta_pnl", "transaction_cost_pnl",
+                          "predicted_pnl", "realized_pnl", "attribution_error"]].sum()
     print(totals.to_string())
 
 

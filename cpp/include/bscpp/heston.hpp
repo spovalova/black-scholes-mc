@@ -26,7 +26,14 @@ public:
     // Uses the Albrecher, Mayer, Schoutens & Tistaert (2007) "Little Trap"
     // reformulation of the original Heston (1993) characteristic function,
     // which avoids the branch-cut discontinuities the naive formula hits
-    // for long maturities / certain parameter regions.
+    // for long maturities / certain parameter regions. The P1/P2 integrals
+    // are evaluated via adaptive Simpson quadrature with adaptive upper-
+    // bound extension (not a fixed-node table), specifically so there's no
+    // risk of a transcribed magic-number error from a hand-copied
+    // Gauss-Laguerre table, and so accuracy is measured/self-terminating
+    // rather than assumed at a fixed truncation. Verified accurate even at
+    // 1-day maturity and at vol-of-vol badly violating the Feller
+    // condition (xi=3.0 against 2*kappa*theta=0.16) -- see test_heston.py.
     static double price(double spot, double strike, double rate, double dividend_yield,
                          double maturity, OptionType type, const HestonParams& hp);
 
@@ -55,6 +62,17 @@ public:
     // CIR variance process: v is floored at 0 wherever it appears in the
     // drift/diffusion, which keeps S well-defined without needing a more
     // elaborate (e.g. QE) scheme.
+    //
+    // Known limitation, quantified in test_heston.py: this scheme has a
+    // well-documented discretization bias that grows large specifically
+    // when the Feller condition is badly violated (variance keeps hitting
+    // its floor between steps). At xi=3.0 against 2*kappa*theta=0.16, 300
+    // steps disagrees with the (independently verified) analytic price by
+    // ~40 standard errors; the bias shrinks monotonically and is within
+    // 1 standard error by ~3000 steps. Don't trust a low-step-count MC
+    // price against extreme (Feller-violating) parameters without either
+    // increasing num_steps substantially or cross-checking against
+    // HestonPricer::price.
     MCResult price(double spot, double strike, double rate, double dividend_yield,
                    double maturity, OptionType type, const HestonParams& hp, long num_paths,
                    int num_steps);

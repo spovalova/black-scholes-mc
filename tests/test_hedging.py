@@ -111,6 +111,55 @@ def test_pnl_attribution_matches_carr_madan_closed_form():
     assert math.isclose(predicted_total, closed_form_total, rel_tol=0.05)
 
 
+def test_transaction_costs_reduce_pnl_and_scale_with_bps():
+    rng = np.random.default_rng(11)
+    dates = pd.date_range(dt.date.today(), periods=60, freq="D")
+    vol = 0.35
+    dt_frac = 1 / 365
+    rets = rng.normal((0.05 - 0.5 * vol**2) * dt_frac, vol * np.sqrt(dt_frac), size=59)
+    path = 100 * np.exp(np.concatenate([[0], np.cumsum(rets)]))
+    prices = pd.Series(path, index=dates)
+
+    pnls, costs = [], []
+    for bps in (0, 5, 20):
+        backtester = HedgingBacktester(rate=0.05, transaction_cost_bps=bps)
+        result = backtester.run(prices, strike=100, expiration=dates[-1].date(), hedge_vol=vol,
+                                 option_type="call")
+        costs.append(result["transaction_cost"].sum())
+        pnls.append(result["portfolio_value"].iloc[-1])
+
+    assert costs[0] == 0.0
+    assert costs[1] < costs[2]  # more bps -> more cost
+    # cost should scale ~linearly with bps (same trade sizes, just pricier)
+    assert math.isclose(costs[2] / costs[1], 4.0, rel_tol=0.05)
+    assert pnls[0] > pnls[1] > pnls[2]  # more cost -> strictly worse P&L
+
+
+def test_transaction_cost_attribution_is_exact_not_approximate():
+    # Unlike gamma_pnl/theta_pnl (Taylor approximations), transaction costs
+    # are a direct, exactly-known cash flow -- adding them to
+    # predicted_pnl should not change the attribution_error residual AT
+    # ALL, regardless of the cost level.
+    rng = np.random.default_rng(11)
+    dates = pd.date_range(dt.date.today(), periods=60, freq="D")
+    vol = 0.35
+    dt_frac = 1 / 365
+    rets = rng.normal((0.05 - 0.5 * vol**2) * dt_frac, vol * np.sqrt(dt_frac), size=59)
+    path = 100 * np.exp(np.concatenate([[0], np.cumsum(rets)]))
+    prices = pd.Series(path, index=dates)
+
+    errors = []
+    for bps in (0, 5, 20):
+        backtester = HedgingBacktester(rate=0.05, transaction_cost_bps=bps)
+        result = backtester.run(prices, strike=100, expiration=dates[-1].date(), hedge_vol=vol,
+                                 option_type="call")
+        attributed = backtester.attribute_pnl(result)
+        errors.append(attributed["attribution_error"].abs().sum())
+
+    assert math.isclose(errors[0], errors[1], abs_tol=1e-9)
+    assert math.isclose(errors[0], errors[2], abs_tol=1e-9)
+
+
 def test_realized_vs_implied_pnl_sign_matches_theory():
     # Selling/hedging at hedge_vol while the world realizes a *lower* vol
     # should be profitable for the seller; a *higher* realized vol should
@@ -125,3 +174,16 @@ def test_realized_vs_implied_pnl_sign_matches_theory():
     assert low > 0
     assert high < 0
     assert low > high
+
+
+def test_realized_vs_implied_experiment_transaction_costs_reduce_every_pnl():
+    frictionless = realized_vs_implied_experiment(
+        hedge_vol=0.30, realized_vols=[0.15, 0.30, 0.45], spot=100, strike=100, rate=0.05,
+        t_days=45, n_paths_per_vol=250, seed=42, transaction_cost_bps=0,
+    )
+    with_cost = realized_vs_implied_experiment(
+        hedge_vol=0.30, realized_vols=[0.15, 0.30, 0.45], spot=100, strike=100, rate=0.05,
+        t_days=45, n_paths_per_vol=250, seed=42, transaction_cost_bps=10,
+    )
+    shift = frictionless["mean_hedging_pnl"].to_numpy() - with_cost["mean_hedging_pnl"].to_numpy()
+    assert (shift > 0).all()  # costs strictly reduce P&L at every realized-vol level

@@ -1,5 +1,7 @@
 import math
 
+import numpy as np
+
 import bscpp
 
 
@@ -65,6 +67,53 @@ def test_mc_greeks_close_to_bs():
     mc = bscpp.MonteCarloPricer(seed=7).greeks_european(inputs, 200_000, True)
     assert math.isclose(mc.delta, bs.delta, abs_tol=0.03)
     assert math.isclose(mc.vega, bs.vega, abs_tol=1.5)
+
+
+def test_iv_solver_brent_fallback_handles_extreme_cases_without_nan():
+    # Stress test across extreme moneyness/maturity/vol: the Brent's-method
+    # fallback (replacing plain bisection) should never return NaN for a
+    # genuinely solvable price -- Newton alone used to fail (flat vega)
+    # deep ITM/OTM and near expiry, which is exactly the regime this
+    # targets. Brent is bracket-guaranteed convergent given [1e-6, 5.0]
+    # brackets the root, which it does for any economically meaningful price.
+    rng = np.random.default_rng(0)
+    n_nan = 0
+    well_posed_errs = []
+    n_total = 0
+
+    for _ in range(5000):
+        strike = rng.uniform(1, 1000)
+        rate = rng.uniform(-0.02, 0.10)
+        div = rng.uniform(0, 0.05)
+        maturity = rng.uniform(1 / 365, 3.0)
+        true_vol = rng.uniform(0.01, 3.0)
+        otype = "call" if rng.random() < 0.5 else "put"
+
+        inputs = bscpp.make_inputs(100.0, strike, rate, true_vol, maturity, otype, div)
+        price = bscpp.bs_price(inputs)
+        vega = bscpp.bs_greeks(inputs).vega
+        if price <= 1e-12:
+            continue
+        n_total += 1
+
+        iv = bscpp.bs_implied_vol(inputs, price)
+        assert iv == iv, "solver returned NaN for a genuinely solvable price"  # NaN check
+        if iv != iv:
+            n_nan += 1
+            continue
+
+        # Only require accurate recovery where the inverse problem is
+        # well-posed (vega meaningfully above zero relative to price scale).
+        # Deep ITM + near-expiry contracts have price essentially flat in
+        # vol -- no solver, Brent's or otherwise, can recover a generating
+        # vol the price itself doesn't distinguish.
+        if vega > 1e-3 * max(price, 1.0):
+            well_posed_errs.append(abs(iv - true_vol))
+
+    assert n_nan == 0
+    well_posed_errs = np.array(well_posed_errs)
+    assert len(well_posed_errs) > 0.5 * n_total  # most cases should be well-posed
+    assert well_posed_errs.max() < 1e-3  # essentially exact recovery where it's solvable
 
 
 def test_trading_greeks_unit_conversion():

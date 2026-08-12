@@ -91,8 +91,10 @@ PYBIND11_MODULE(_core, m) {
     py::class_<AmericanPricer>(m, "AmericanPricer")
         .def(py::init<std::uint64_t>(), py::arg("seed") = 42)
         .def("price", &AmericanPricer::price, py::arg("inputs"), py::arg("num_paths"),
-             py::arg("num_steps"), py::arg("poly_degree") = 2,
-             "American-style option price via Longstaff-Schwartz least-squares Monte Carlo.");
+             py::arg("num_steps"), py::arg("poly_degree") = 2, py::arg("num_calibration_paths") = 0,
+             "American-style option price via Longstaff-Schwartz least-squares Monte Carlo, "
+             "using an independently-seeded calibration path set (num_calibration_paths, "
+             "defaults to num_paths) separate from the pricing path set.");
 
     py::class_<HestonParams>(m, "HestonParams")
         .def(py::init([](double kappa, double theta, double xi, double rho, double v0) {

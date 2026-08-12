@@ -1,11 +1,17 @@
 # bscpp
 
 A derivatives pricing and quantitative research toolkit: a C++ pricing
-core (analytic Black-Scholes, Monte Carlo, Longstaff-Schwartz American
-pricing) exposed to Python via pybind11, plus a Python layer that prices
-live option chains against real market data, constructs and analyzes
-multi-leg strategies, fits arbitrage-checked implied vol surfaces, and
-simulates delta-hedging P&L with a full Greeks attribution.
+core (analytic Black-Scholes, Monte Carlo, Longstaff-Schwartz American,
+Heston stochastic vol) exposed to Python via pybind11, plus a Python layer
+that prices live option chains against real market data, constructs and
+analyzes multi-leg strategies, fits arbitrage-checked implied vol surfaces,
+simulates delta-hedging P&L (with transaction costs and a full Greeks
+attribution) against both simulated and real historical data, and
+aggregates portfolio-level risk with configurable limits. Every non-trivial
+formula and algorithm was checked against the published literature and/or
+production implementations (mostly QuantLib's source) before being trusted
+-- see "External verification" below for what that surfaced, fixed, and
+still leaves open.
 
 ## Layout
 
@@ -23,31 +29,43 @@ python/bscpp/                 Python package (imports the compiled extension)
   __init__.py                  Pythonic wrappers, trading_greeks() unit conversion
   strategies.py                 multi-leg strategies: straddle/strangle/vertical/
                                  strip/strap/butterfly, net Greeks, exact breakevens
+  risk.py                        portfolio Greeks aggregation + configurable limit checks
   backtest/
     data_provider.py            DataProvider interface: PolygonProvider, MockProvider
     engine.py                    StripPricer / Backtester -- chain pricing vs. market
-    hedging.py                   HedgingBacktester -- delta-hedging P&L + attribution
-    vol_surface.py                SVI fitting + Breeden-Litzenberger arbitrage checks
-    heston_calibration.py          fits Heston params to a chain's implied vols
+    hedging.py                   HedgingBacktester -- delta-hedging P&L, transaction
+                                  costs, and attribution
+    vol_surface.py                SVI fitting + two independent arbitrage checks
+    heston_calibration.py          fits Heston params to a chain's implied vols,
+                                    with regularization + a stability diagnostic
 
-tests/                        pytest suite (34 tests): closed-form benchmarks,
+tests/                        pytest suite (53 tests): closed-form benchmarks,
                                convergence behavior, arbitrage-free checks,
-                               accounting-identity checks, backtest plumbing
-examples/                     runnable demos -- all but run_backtest.py (non-mock)
-                               and real_data_hedging_demo.py need no API key
+                               accounting-identity checks, stress tests, backtest
+                               plumbing
+examples/                     runnable demos -- all but run_backtest.py (non-mock),
+                               real_data_hedging_demo.py, and
+                               real_data_validation_study.py need no API key
 ```
 
 ## What's implemented, and why it isn't a toy
 
 **C++ pricing core**
-- Closed-form Black-Scholes-Merton (calls/puts, continuous dividend yield),
-  full Greeks (delta, gamma, vega, theta, rho), and a Newton-Raphson +
-  bisection-fallback implied-vol solver. Known limitation, found via
-  external comparison: this is materially weaker than the industry-standard
-  solver, Peter Jaeckel's "Let's Be Rational" (2015, used by `py_vollib`) --
-  not hypothetical, it's the exact reason the deep-ITM IV-solve fallback
-  documented below (`StripPricer`) ever triggers (see `black_scholes.hpp`
-  for details).
+- Closed-form Black-Scholes-Merton (calls/puts, continuous dividend yield)
+  and full Greeks (delta, gamma, vega, theta, rho).
+- **Implied-vol solver**: Newton-Raphson first (fast when vega isn't
+  tiny), falling back to **Brent's method** (bracket-guaranteed
+  convergent, never divides by vega) rather than the crude bisection this
+  used to fall back to. Stress-tested across 20,000 random (strike, rate,
+  maturity, vol) combinations spanning extreme moneyness and maturities
+  from 1 day to 3 years: **zero NaN failures**, and machine-precision
+  recovery (<1e-5 error) in the ~89% of cases where the inverse problem is
+  well-posed (vega meaningfully above zero). The remaining ~11% (deep ITM
+  + near-expiry) aren't solver failures -- price is numerically flat in
+  vol there for *any* solver, including Jaeckel's "Let's Be Rational"
+  (2015, the industry-standard solver used by `py_vollib`, which this
+  still isn't a byte-for-byte port of -- see `black_scholes.hpp` for the
+  full writeup and remaining speed gap).
 - **Batch pricing/IV variants** (`bs_price_with_greeks_batch`,
   `bs_implied_vol_batch`) that loop in C++ rather than crossing the
   Python/C++ boundary once per contract -- `StripPricer` prices a whole
@@ -61,17 +79,16 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
 - **American-style pricing via Longstaff-Schwartz (2001) least-squares
   Monte Carlo**: simulates full paths, walks backward from maturity
   regressing realized continuation value onto a polynomial basis to decide
-  optimal early exercise. Validated against the paper's own benchmark
-  (S=36, K=40, r=6%, vol=20%, T=1y -> independent implementations converge
-  to ~4.47-4.48) and against the no-arbitrage identity that an American
-  call with no dividends prices identically to its European counterpart.
-  The ITM-only regression filter and monomial-basis-with-S/K-normalization
-  choice were both confirmed to match QuantLib's own production defaults.
-  Known gap, also confirmed against QuantLib: this regresses and prices
-  along the *same* path set, where QuantLib deliberately uses a
-  separately-seeded calibration set to avoid a known small upward
-  (look-ahead) bias -- likely small at this project's path counts, but not
-  eliminated the way QuantLib's is.
+  optimal early exercise, using **two independently-seeded path sets**
+  (calibration and pricing) -- matching QuantLib's `MCLongstaffSchwartzEngine`
+  and specifically avoiding the small upward look-ahead bias of regressing
+  and pricing on the same paths. Validated against the paper's own
+  benchmark (S=36, K=40, r=6%, vol=20%, T=1y -> independent implementations
+  converge to ~4.47-4.48) and against the no-arbitrage identity that an
+  American call with no dividends prices identically to its European
+  counterpart. The ITM-only regression filter and monomial-basis-with-
+  S/K-normalization choice were both confirmed to match QuantLib's own
+  production defaults.
 
 **Multi-leg strategies** (`bscpp.strategies`)
 - `straddle`, `strangle`, `vertical_spread`, `butterfly`, and the two
@@ -126,6 +143,19 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   inconsistent with using dividend-adjusted Black-Scholes deltas (caught
   during external verification, since every existing test/demo happened
   to use `dividend_yield=0` and never exercised the bug).
+- **`transaction_cost_bps`**: charges the cost of crossing the bid-ask
+  spread on every trade (the initial hedge, each daily rebalance, and the
+  final liquidation) -- the single biggest realism gap in calling this a
+  "backtester" versus a frictionless pricing demo. Confirmed to strictly
+  reduce P&L and scale (near-)linearly with bps; confirmed to bite harder
+  at higher realized vol (bigger daily moves -> bigger delta changes ->
+  more rebalance notional traded), roughly 30-45% more drag at
+  realized_vol=0.45 than at 0.15 in `hedging_pnl_experiment.py`'s own
+  sweep. Unlike gamma/theta (Taylor approximations), the cost flows
+  through the same cash account **exactly**, so it's added to
+  `attribute_pnl`'s `predicted_pnl` as an exact term -- confirmed to leave
+  `attribution_error` completely unchanged (to float precision) at every
+  cost level tested, which is what an exact (non-approximated) term should do.
 - `realized_vs_implied_experiment`: sweeps realized vol against a fixed
   hedge_vol and shows the textbook result -- hedging at a vol *above* what
   actually realizes is profitable for the seller, *below* it is not, P&L
@@ -154,6 +184,16 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   solve implied vol per contract (batched), price with both BS and MC, and
   report theoretical price vs. observed market mid plus full Greeks.
 
+**Portfolio risk aggregation** (`bscpp.risk`)
+- `PortfolioRiskManager`: net Greeks across a list of `Position`s (options
+  and/or stock, spanning multiple underlyings), grouped by underlying, with
+  configurable `RiskLimits` and breach flagging. Stated plainly in the
+  module docstring and here: this is net-Greeks aggregation with limits, not
+  a production risk system -- no live feed, no margin/capital model, no
+  kill switch, no scenario engine. That gap is a category difference (a
+  personal research project vs. a trading desk's infrastructure), not a
+  code-quality problem this project can or should pretend to close.
+
 **Heston stochastic volatility** (`bscpp.heston_price`, `bscpp.backtest.heston_calibration`)
 - Semi-analytic pricer via the Heston (1993) characteristic function, using
   the Albrecher, Mayer, Schoutens & Tistaert (2007) **"Little Trap"**
@@ -170,7 +210,19 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   convergence, the sharpest test of a sign/branch-cut error), (2) agrees
   with the independent MC engine within a few standard errors across
   strikes, option types, and a Feller-condition-violating stress case,
-  (3) exact put-call parity.
+  (3) exact put-call parity. Also confirmed accurate at 1-day maturity and
+  at vol-of-vol so extreme it badly violates the Feller condition (xi=3.0
+  vs. 2*kappa*theta=0.16) -- a naive MC comparison there is *misleading*
+  (the MC scheme's own known discretization bias is ~40 std errors off at
+  300 steps, converging to the analytic price only by ~3000 steps; see
+  `heston.hpp` for the full writeup).
+- The P1/P2 integrals are evaluated via **adaptive Simpson quadrature**
+  with adaptive upper-bound extension, not a fixed-node table -- swapped
+  in specifically to avoid the risk of a transcribed Gauss-Laguerre
+  magic-number error, and because it self-terminates on measured error
+  rather than an unverified fixed truncation (the previous fixed
+  phi_max=200/4000-point rule was explicitly untested at extreme
+  parameters; the adaptive version is verified there instead).
 - `calibrate_heston`: fits (kappa, theta, xi, rho, v0) to a chain's implied
   vols via `scipy.optimize.least_squares`, calibrating in **IV space**
   rather than raw price space (price-space residuals are dominated by deep
@@ -181,10 +233,19 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
 - Heston has a well-known parameter identifiability issue -- different
   parameter vectors can produce near-identical smiles, especially for
   short-dated, mildly-curved data, where `v0` is poorly pinned down
-  independent of `theta`/`kappa`. `heston_calibration_demo.py` shows this
-  happening on real (synthetic) data rather than pretending it doesn't
-  exist: v0 lands at its bound while fit quality stays good -- the honest
-  lesson being that low RMSE doesn't mean every parameter is well-identified.
+  independent of `theta`/`kappa`. Rather than just documenting this,
+  `calibrate_heston` applies **Tikhonov-style regularization** (pulling
+  v0/theta toward the ATM variance prior, kappa toward a market-typical
+  scale) that measurably fixes it on the exact case that used to break: v0
+  moves from a degenerate 0.0006 to a sane 0.032 (right at the ATM
+  variance level) at essentially unchanged fit quality. `calibrate_heston_with_stability`
+  runs several randomly-perturbed initial guesses and reports whether fit
+  quality *and* the parameters themselves are stable across starts --
+  confirmed to correctly distinguish the regularized case (perfectly
+  stable, param std=0 across 6 starts) from the unregularized one
+  (kappa std=5.8!, despite nearly identical RMSE) -- the diagnostic a desk
+  re-hedging off tomorrow's recalibration actually needs, not just a
+  single point estimate.
 - `heston_satisfies_feller_condition`: checks `2*kappa*theta >= xi^2`
   (keeps the variance process a.s. positive) as a diagnostic -- many
   market-calibrated fits violate it in practice, which is itself a useful
@@ -203,7 +264,13 @@ stochastic vol models beyond Heston (SABR, rough vol), a full historical
 options-tick database integration, and a full backtest P&L simulation of
 *multi-leg* strategies over time (the hedging backtest covers single-leg
 positions; extending `HedgingBacktester` to net multi-leg Greeks is a
-natural next step on top of `strategies.py`).
+natural next step on top of `strategies.py`). Also out of scope, and worth
+being direct about rather than implying otherwise: a real-time market data
+feed, an order/execution management system, margin and capital modeling,
+and a kill switch -- the things that separate "correct pricing math" from
+"safe to connect to a real trading account." Nothing in this project should
+be read as claiming to have closed that gap; it's a different, much larger
+undertaking than a personal pricing/research project.
 
 ## External verification
 
@@ -234,14 +301,18 @@ the same subtle error twice. Highlights:
   crediting dividend income on the stock hedge leg, silently inconsistent
   with using dividend-adjusted deltas. Every existing test/demo used
   `dividend_yield=0` and never exercised it.
-- Concrete, unresolved gaps this surfaced are called out inline above
-  (IV solver vs. Jaeckel's method, LSM's shared calibration/pricing path
-  set, no cross-expiry/SSVI arbitrage guarantee, Heston's fixed-step
-  quadrature vs. QuantLib's Gauss-Laguerre, hedging's vega P&L being zero
-  by construction) rather than fixed outright -- each is a real, literature-
-  backed limitation, not a bug, and the honest thing was to document them
-  rather than quietly patch over the gap between "correct" and
-  "production-grade."
+- Concrete gaps this surfaced (IV solver, LSM's shared path set, Heston's
+  quadrature scheme, and hedging's lack of transaction costs and a risk
+  aggregation layer) were then **fixed**, not just documented -- see the
+  bullets above for each; every fix was independently verified before being
+  called done (a 20,000-case IV solver stress test, Heston re-verified at
+  Feller-violating and 1-day-maturity extremes, transaction costs confirmed
+  to leave `attribution_error` byte-for-byte unchanged, and the multi-ticker
+  real-data study below in place of a single-anecdote demo). What's still
+  explicitly out of scope (SSVI, vega P&L in the hedging attribution, and
+  everything under "production risk system") remains genuinely out of
+  scope for the reasons stated -- not a fix that was skipped, but ground
+  this project isn't claiming to cover.
 
 ## Setup
 
@@ -262,15 +333,16 @@ pytest tests/
 ```bash
 python examples/american_pricing_demo.py     # European vs. American (LSM) pricing
 python examples/strategy_demo.py               # straddle/strangle/vertical/strip/strap/butterfly
-python examples/hedging_pnl_experiment.py       # realized-vs-implied vol P&L sweep
+python examples/portfolio_risk_demo.py          # net Greeks + limit breaches across a portfolio
+python examples/hedging_pnl_experiment.py       # realized-vs-implied vol P&L sweep + transaction costs
 python examples/vol_surface_fit_demo.py         # SVI fit + arbitrage check on a synthetic smile
-python examples/heston_calibration_demo.py       # Heston calibration vs. SVI on the same chain
+python examples/heston_calibration_demo.py       # Heston calibration + stability diagnostic vs. SVI
 python examples/run_backtest.py --mock --ticker SPY   # full chain-pricing pipeline
 ```
 
 Sample output from `hedging_pnl_experiment.py` (selling an ATM call, hedging
 daily at 30% vol, 60 days to expiry, 400 simulated paths per realized-vol
-level):
+level, frictionless):
 
 ```
  realized_vol  hedge_vol  mean_hedging_pnl  std_hedging_pnl
@@ -285,22 +357,40 @@ level):
 
 ```bash
 python examples/real_data_hedging_demo.py --ticker AAPL --hedge-vol 0.30
+python examples/real_data_validation_study.py
 ```
 
-This pulls real historical daily closes, runs the delta-hedging backtest
-against them, and prints the P&L attribution -- confirmed working on
-Polygon/Massive's **base** equities tier (their daily aggregates endpoint
-doesn't require an options plan). Sample attribution output from a real
-run against AAPL:
+`real_data_hedging_demo.py` pulls real historical daily closes, runs the
+delta-hedging backtest against them, and prints the P&L attribution
+(including transaction costs) -- confirmed working on Polygon/Massive's
+**base** equities tier (their daily aggregates endpoint doesn't require an
+options plan). Sample attribution output from a real run against AAPL:
 
 ```
-financing_pnl       -1.67
-gamma_pnl           -7.75
-theta_pnl            7.77
-predicted_pnl       -1.66
-realized_pnl        -1.94
-attribution_error   -0.28
+financing_pnl          -1.82
+gamma_pnl               -6.80
+theta_pnl                6.99
+transaction_cost_pnl    -0.39
+predicted_pnl           -2.01
+realized_pnl            -2.26
+attribution_error       -0.25
 ```
+
+`real_data_validation_study.py` is the multi-ticker, multi-window
+statistical version of the same idea: real daily closes for 5 liquid names
+(AAPL, MSFT, GOOGL, AMZN, SPY) over ~9 months, rolled forward across 10
+overlapping 45-day windows per ticker using trailing realized vol as the
+hedge_vol forecast (no invented implied vol -- this only needs the base
+equities tier). Across 50 real out-of-sample ticker-windows:
+
+```
+Hit rate (sign(hedge_vol - forward_realized_vol) == sign(hedging_pnl)): 80.0%
+Correlation(vol_gap, hedging_pnl): r=0.877, p=0.0000
+```
+
+That's the realized-vs-implied vol P&L relationship holding up out of
+sample, across multiple names, on real data -- not a single cherry-pickable
+window.
 
 `run_backtest.py`/`StripPricer` (chain snapshots) is the one demo that does
 need an options-capable plan -- see below.
@@ -354,12 +444,23 @@ heston_price = bscpp.heston_price(100, 100, 0.05, 0.0, 1.0, bscpp.OptionType.Cal
 strat_pricer = bscpp.StrategyPricer(rate=0.05)
 result = strat_pricer.price(bscpp.straddle(strike=100), spot=100, vol=0.2, maturity=1.0)
 plot_df, breakevens = strat_pricer.payoff_diagram(bscpp.straddle(strike=100), spot=100, vol=0.2, maturity=1.0)
+
+# Portfolio risk aggregation
+positions = [
+    bscpp.Position("AAPL call", "call", quantity=10, underlying="AAPL", spot=200, rate=0.05,
+                    strike=210, vol=0.25, maturity=0.5),
+    bscpp.Position("AAPL hedge", "stock", quantity=-500, underlying="AAPL", spot=200, rate=0.05),
+]
+risk_mgr = bscpp.PortfolioRiskManager(bscpp.RiskLimits(max_abs_vega=50))
+net = risk_mgr.net_greeks(positions)
+breaches = risk_mgr.check_limits(positions)
 ```
 
 ```python
 from bscpp.backtest import (
     MockProvider, StripPricer, HedgingBacktester,
-    fit_svi_slice, svi_butterfly_arbitrage_check, calibrate_heston,
+    fit_svi_slice, svi_butterfly_arbitrage_check, svi_gatheral_jacquier_check,
+    calibrate_heston, calibrate_heston_with_stability,
 )
 
 provider = MockProvider(spot=450.0, base_vol=0.18)
@@ -367,12 +468,15 @@ pricer = StripPricer(provider, rate=0.05)
 chain = pricer.price_strip("SPY", expiration, strike_range=(0.9, 1.1))
 
 svi = fit_svi_slice(chain["strike"], chain["model_iv"], spot=450.0, t_years=chain["T"].iloc[0])
-arb = svi_butterfly_arbitrage_check(svi, spot=450.0, rate=0.05)
+arb = svi_butterfly_arbitrage_check(svi, spot=450.0, rate=0.05)       # numerical (Breeden-Litzenberger)
+arb2 = svi_gatheral_jacquier_check(svi)                                # closed-form g(k), cross-check
 
 heston = calibrate_heston(chain["strike"], chain["type"], chain["model_iv"],
                            spot=450.0, t_years=chain["T"].iloc[0], rate=0.05)
+stability = calibrate_heston_with_stability(chain["strike"], chain["type"], chain["model_iv"],
+                                             spot=450.0, t_years=chain["T"].iloc[0], rate=0.05)
 
-hedger = HedgingBacktester(rate=0.05)
+hedger = HedgingBacktester(rate=0.05, transaction_cost_bps=5.0)
 result = hedger.run(price_history, strike=450, expiration=expiration, hedge_vol=0.18)
-attributed = hedger.attribute_pnl(result)  # financing / gamma / theta P&L breakdown
+attributed = hedger.attribute_pnl(result)  # financing / gamma / theta / transaction cost breakdown
 ```

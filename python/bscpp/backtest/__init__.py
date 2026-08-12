@@ -1,6 +1,10 @@
 from bscpp.backtest.data_provider import DataProvider, MockProvider, PolygonProvider
 from bscpp.backtest.engine import Backtester, StripPricer
-from bscpp.backtest.heston_calibration import calibrate_heston, heston_fit_rmse
+from bscpp.backtest.heston_calibration import (
+    calibrate_heston,
+    calibrate_heston_with_stability,
+    heston_fit_rmse,
+)
 from bscpp.backtest.hedging import HedgingBacktester, realized_vs_implied_experiment
 from bscpp.backtest.vol_surface import (
     SVISlice,
@@ -28,5 +32,6 @@ __all__ = [
     "svi_g_function",
     "svi_gatheral_jacquier_check",
     "calibrate_heston",
+    "calibrate_heston_with_stability",
     "heston_fit_rmse",
 ]

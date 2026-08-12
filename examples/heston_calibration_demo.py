@@ -13,6 +13,7 @@ from bscpp.backtest import (
     MockProvider,
     StripPricer,
     calibrate_heston,
+    calibrate_heston_with_stability,
     fit_svi_slice,
     heston_fit_rmse,
     svi_fit_rmse,
@@ -45,23 +46,32 @@ def main():
     svi = fit_svi_slice(strikes, market_ivs, spot=spot, t_years=t_years, rate=rate)
     svi_rmse = svi_fit_rmse(svi, strikes, market_ivs, spot=spot, rate=rate)
 
-    print(f"Heston: {heston}")
+    print(f"Heston (regularized): {heston}")
     print(f"  fit RMSE: {heston_rmse * 100:.3f} vol points")
     print(f"  Feller condition (2*kappa*theta >= xi^2): {'satisfied' if feller_ok else 'violated'}\n")
 
     print(f"SVI:    {svi}")
     print(f"  fit RMSE: {svi_rmse * 100:.3f} vol points\n")
 
-    if heston.v0 <= 1.1e-4:
-        print("Note: v0 landed at (or near) its lower bound. This is a well-known Heston "
-              "calibration phenomenon, not a bug: for a short-dated, mildly-curved smile like "
-              "this one, v0 is poorly identified independently of theta/kappa -- many (v0, "
-              "kappa, theta) combinations fit the observed IVs almost equally well (a 'flat "
-              "direction' in the loss surface). The fit quality above (low RMSE) can still be "
-              "good even when an individual parameter looks like it hit a wall. This is exactly "
-              "why real desks constrain or regularize short-dated Heston calibrations, or "
-              "calibrate jointly across multiple expiries so longer-dated points pin down v0 "
-              "and theta separately.\n")
+    # This exact short-dated, mildly-curved smile is a known case where the
+    # UNREGULARIZED fit drives v0 to its lower bound -- a real
+    # identifiability failure mode, not a solver bug. Show both, and the
+    # multi-start stability diagnostic that actually quantifies it, rather
+    # than just asserting the regularized fit is fine.
+    unregularized = calibrate_heston(strikes, option_types, market_ivs, spot, t_years, rate,
+                                      regularization_weight=0.0)
+    print(f"Unregularized fit for comparison: v0={unregularized.v0:.6f} "
+          f"(vs. regularized v0={heston.v0:.6f}, ATM variance ~{market_ivs[len(market_ivs)//2]**2:.6f})")
+    print("-> regularization pulls v0 out of the degenerate near-zero corner without materially "
+          "changing fit quality; nothing about the RAW data pins v0 down on its own here.\n")
+
+    print("Multi-start stability diagnostic (6 random initial guesses):")
+    stability = calibrate_heston_with_stability(strikes, option_types, market_ivs, spot, t_years,
+                                                 rate, n_starts=6)
+    print(f"  all_rmse: {[round(r, 5) for r in stability['all_rmse']]}")
+    print(f"  param_std: {{{', '.join(f'{k}: {v:.5f}' for k, v in stability['param_std'].items())}}}")
+    print(f"  fit_quality_stable: {stability['fit_quality_stable']}   "
+          f"params_stable: {stability['params_stable']}\n")
 
     print("Heston's edge over SVI: it's a full DYNAMIC model (the smile evolves consistently "
           "as spot/time move, since it comes from an actual SDE) rather than a snapshot curve "
