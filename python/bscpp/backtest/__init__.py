@@ -6,6 +6,13 @@ from bscpp.backtest.heston_calibration import (
     heston_fit_rmse,
 )
 from bscpp.backtest.hedging import HedgingBacktester, realized_vs_implied_experiment
+from bscpp.backtest.policies import (
+    BandPolicy,
+    CallablePolicy,
+    DeltaPolicy,
+    HedgeState,
+    WhalleyWilmottPolicy,
+)
 from bscpp.backtest.vol_surface import (
     SVISlice,
     fit_svi_slice,
@@ -24,6 +31,11 @@ __all__ = [
     "Backtester",
     "HedgingBacktester",
     "realized_vs_implied_experiment",
+    "DeltaPolicy",
+    "BandPolicy",
+    "WhalleyWilmottPolicy",
+    "CallablePolicy",
+    "HedgeState",
     "SVISlice",
     "fit_svi_slice",
     "svi_fit_rmse",

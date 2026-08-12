@@ -3,6 +3,48 @@
 All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [Unreleased] - M1: hedging laboratory core
+
+The three capabilities that make the hedging backtester a research
+instrument rather than a demo: optimal rebalancing policies, vega-aware
+attribution, and publication-grade statistics. 18 new tests (76 total).
+
+### Added
+
+- **`bscpp.backtest.policies`** -- the rebalancing-policy ladder from the
+  transaction-cost literature: `DeltaPolicy` (rebalance to exact delta,
+  the baseline), `BandPolicy` (fixed no-trade band, trade to the nearest
+  edge on breach), `WhalleyWilmottPolicy` (Whalley & Wilmott 1997
+  asymptotically-optimal band; its published Gamma^(2/3), cost^(1/3), and
+  risk-aversion^(-1/3) scalings are verified numerically to <1e-9), and
+  `CallablePolicy` (plug-in point for custom/learned policies).
+  `HedgingBacktester.run` takes `policy=`; default preserves the classic
+  daily-rebalanced behavior exactly.
+- **Vega-aware attribution**: `hedge_vol` may now be a time series (the
+  option is re-marked at each date's vol); `attribute_pnl` gains explicit
+  `vega_pnl` and `delta_gap_pnl` terms (the latter accounts for
+  deliberately holding away from delta inside a no-trade band). Both are
+  identically zero in the constant-vol, rebalance-to-delta configuration
+  -- exact backward compatibility, regression-tested.
+- **`bscpp.stats`** -- honest inference for dependent data: effective
+  sample size (validated against AR(1) theory), Newey-West HAC t-stats,
+  Politis-Romano stationary block bootstrap (coverage-tested), and
+  dependent-correlation CIs (shown to avoid false certainty on
+  independent-but-autocorrelated noise). No function returns a bare
+  p-value; result objects carry their assumptions in their repr.
+
+### Fixed
+
+- **Vol-clock inconsistency in the validation study**:
+  `annualized_realized_vol` scaled trading-day returns by sqrt(365) while
+  the backtester accrues calendar-day time -- inflating vol ~20% vs. the
+  usual convention. Realized variance is now computed per unit of elapsed
+  calendar time, matching the backtester's clock exactly.
+- The validation study's headline inference replaced: i.i.d. Pearson
+  p-value (meaningless for overlapping windows on co-moving tickers)
+  removed in favor of a block-bootstrap CI with effective sample size
+  reported alongside nominal N.
+
 ## [0.2.0] - 2026-08-12
 
 Foundation release ("M0"): four correctness bugs found in an external
