@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 
 from bscpp.backtest.vol_surface import (
@@ -91,3 +93,24 @@ def test_closed_form_g_resolves_short_dated_noise_floor():
     result = svi_gatheral_jacquier_check(stress)
     assert result["arbitrage_free"]
     assert result["min_g"] > 1e-3  # unambiguous, not noise-floor-close to 0
+
+
+def test_negative_total_variance_fails_both_checks():
+    # Regression test for a real false-negative hole found in external
+    # review: a slice with NEGATIVE total variance somewhere (min w = -0.048
+    # here -- negative implied variance, an outright arbitrage) previously
+    # PASSED svi_gatheral_jacquier_check, because g(k) >= 0 is only
+    # meaningful conditional on w(k) > 0 and no precondition was enforced.
+    # Both checks must now reject such a slice outright, with a reason.
+    bad = SVISlice(a=-0.05, b=0.02, rho=0.0, m=0.0, sigma=0.1, t=0.5)
+    assert svi_min_total_variance(bad) < 0.0  # confirms the pathology
+
+    closed = svi_gatheral_jacquier_check(bad)
+    numeric = svi_butterfly_arbitrage_check(bad, spot=100.0, rate=0.0)
+
+    assert not closed["arbitrage_free"]
+    assert closed["reason"] == "negative_total_variance"
+    assert math.isnan(closed["min_g"])  # g values on w<0 are garbage: not reported
+
+    assert not numeric["arbitrage_free"]
+    assert numeric["reason"] == "negative_total_variance"

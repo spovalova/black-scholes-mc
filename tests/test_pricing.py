@@ -116,6 +116,29 @@ def test_iv_solver_brent_fallback_handles_extreme_cases_without_nan():
     assert well_posed_errs.max() < 1e-3  # essentially exact recovery where it's solvable
 
 
+def test_antithetic_std_error_is_calibrated():
+    # Regression test for a real bug: antithetic samples were pooled into
+    # the i.i.d. variance formula, overstating std_error by ~32% (antithetic
+    # pairs are negatively correlated -- that's the point of the technique).
+    # The fixed estimator computes variance over PAIR MEANS. This test checks
+    # the reported std_error against the realized dispersion of the estimator
+    # across independent seeds -- an error bar must describe the error.
+    inputs = _inputs("call")
+    estimates = []
+    reported = []
+    for seed in range(120):
+        r = bscpp.MonteCarloPricer(seed=seed).price_european(inputs, 10_000, True)
+        estimates.append(r.price)
+        reported.append(r.std_error)
+
+    realized_std = float(np.std(estimates, ddof=1))
+    mean_reported = float(np.mean(reported))
+    ratio = mean_reported / realized_std
+    # calibrated error bars: reported within ~15% of realized (sampling
+    # noise in realized_std across 120 seeds is a few percent itself)
+    assert 0.85 < ratio < 1.15, f"std_error miscalibrated: ratio={ratio:.3f}"
+
+
 def test_trading_greeks_unit_conversion():
     greeks = bscpp.bs_greeks(_inputs("call"))
     desk = bscpp.trading_greeks(greeks)

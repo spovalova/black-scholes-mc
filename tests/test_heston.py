@@ -1,6 +1,7 @@
 import math
 
 import numpy as np
+import pytest
 
 import datetime as dt
 
@@ -36,6 +37,7 @@ def test_heston_collapses_to_black_scholes_as_vol_of_vol_shrinks():
     assert diffs[-1] < 1e-3
 
 
+@pytest.mark.slow
 def test_heston_analytic_accurate_in_extreme_feller_violating_regime():
     # xi=3.0 against kappa=2.0, theta=0.04 badly violates the Feller
     # condition (2*kappa*theta=0.16 vs xi^2=9) -- exactly the extreme
@@ -151,6 +153,7 @@ def _short_dated_mock_chain():
     return calls["strike"].to_numpy(), calls["type"].tolist(), calls["model_iv"].to_numpy(), spot, t_years, rate
 
 
+@pytest.mark.slow
 def test_regularization_pulls_v0_out_of_degenerate_corner():
     # On a short-dated, mildly-curved smile, the unregularized fit is known
     # to drive v0 toward its lower bound (a real, observed failure mode --
@@ -173,6 +176,7 @@ def test_regularization_pulls_v0_out_of_degenerate_corner():
     assert rmse_reg < rmse_unreg + 0.01  # doesn't meaningfully hurt fit quality
 
 
+@pytest.mark.slow
 def test_stability_diagnostic_distinguishes_regularized_from_unregularized():
     strikes, option_types, market_ivs, spot, t_years, rate = _short_dated_mock_chain()
 
@@ -187,3 +191,19 @@ def test_stability_diagnostic_distinguishes_regularized_from_unregularized():
     # this is exactly the "low RMSE doesn't mean well-identified" lesson
     assert max(stable["all_rmse"]) < 0.02
     assert max(unstable["all_rmse"]) < 0.02
+
+
+def test_heston_price_never_negative_deep_otm_short_maturity():
+    # Regression test: deep-OTM short-maturity prices used to come back
+    # slightly NEGATIVE (quadrature noise exceeding the tiny true price,
+    # observed -2.3e-7 for the 5-day 200-strike call below). A negative
+    # option price is itself an arbitrage and poisons IV solves, so the
+    # pricer must clamp at the no-arbitrage floor of zero.
+    hp = bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.04)
+    call = bscpp.heston_price(100.0, 200.0, 0.05, 0.0, 5 / 365, bscpp.OptionType.Call, hp)
+    put = bscpp.heston_price(100.0, 40.0, 0.05, 0.0, 5 / 365, bscpp.OptionType.Put, hp)
+    assert call >= 0.0
+    assert put >= 0.0
+    # and they should still be (near-)zero, not inflated by the clamp
+    assert call < 1e-4
+    assert put < 1e-4

@@ -39,10 +39,11 @@ python/bscpp/                 Python package (imports the compiled extension)
     heston_calibration.py          fits Heston params to a chain's implied vols,
                                     with regularization + a stability diagnostic
 
-tests/                        pytest suite (53 tests): closed-form benchmarks,
+tests/                        pytest suite (58 tests): closed-form benchmarks,
                                convergence behavior, arbitrage-free checks,
-                               accounting-identity checks, stress tests, backtest
-                               plumbing
+                               error-bar calibration, regression tests for
+                               every externally-caught bug, stress tests,
+                               backtest plumbing ("-m 'not slow'" runs in ~15s)
 examples/                     runnable demos -- all but run_backtest.py (non-mock),
                                real_data_hedging_demo.py, and
                                real_data_validation_study.py need no API key
@@ -75,7 +76,12 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   (same underlying draws reused across bumped scenarios -- what keeps
   finite-difference Greeks from being unusably noisy). Verified: MC
   standard error shrinks ~4x when path count goes up 16x, matching the
-  theoretical O(1/sqrt(N)) Monte Carlo convergence rate.
+  theoretical O(1/sqrt(N)) Monte Carlo convergence rate. The reported
+  standard error is computed over **antithetic pair means** (an earlier
+  version pooled the negatively-correlated pair members into the i.i.d.
+  formula, overstating std_error by a measured ~32% -- caught in external
+  review; the estimator is now regression-tested against the realized
+  dispersion of the estimator across independent seeds).
 - **American-style pricing via Longstaff-Schwartz (2001) least-squares
   Monte Carlo**: simulates full paths, walks backward from maturity
   regressing realized continuation value onto a polynomial basis to decide
@@ -123,7 +129,12 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   magnitude cheaper and has no finite-difference noise floor. Both were
   confirmed to agree on a well-behaved slice (passes) and a deliberately
   pathological one (extreme rho, tiny sigma -- both correctly flag
-  arbitrage). The closed-form check exists specifically because the
+  arbitrage). Both checks also enforce the **w(k) > 0 precondition**: the
+  g(k) criterion is only meaningful where total variance is positive, and
+  an earlier version passed a negative-total-variance slice (an outright
+  arbitrage) as "arbitrage-free" -- caught in external review, now
+  rejected explicitly with `reason="negative_total_variance"` and
+  regression-tested. The closed-form check exists specifically because the
   numerical one's fixed density tolerance is scale-dependent: on a 1-day
   synthetic maturity it registered a technically-negative density of
   ~1e-13 (finite-difference noise, saved only by the tolerance), while
@@ -301,6 +312,17 @@ the same subtle error twice. Highlights:
   crediting dividend income on the stock hedge leg, silently inconsistent
   with using dividend-adjusted deltas. Every existing test/demo used
   `dividend_yield=0` and never exercised it.
+- A second, adversarial external review pass (v0.2.0) found **four more
+  real bugs** -- notably all in the *statistics and preconditions around*
+  otherwise-correct formulas, not in the formulas themselves: the
+  antithetic MC standard error pooled negatively-correlated pair members
+  as i.i.d. (~32% overstated, measured); the Gatheral-Jacquier check
+  lacked its w(k)>0 precondition (passed an outright-arbitrage slice);
+  the Heston pricer could return slightly negative deep-OTM prices; and
+  the Polygon provider silently truncated paginated chains. All four are
+  fixed with regression tests (see CHANGELOG.md). The lesson is now a
+  house rule: verify the estimators and preconditions, not just the
+  formulas.
 - Concrete gaps this surfaced (IV solver, LSM's shared path set, Heston's
   quadrature scheme, and hedging's lack of transaction costs and a risk
   aggregation layer) were then **fixed**, not just documented -- see the
@@ -385,12 +407,19 @@ equities tier). Across 50 real out-of-sample ticker-windows:
 
 ```
 Hit rate (sign(hedge_vol - forward_realized_vol) == sign(hedging_pnl)): 80.0%
-Correlation(vol_gap, hedging_pnl): r=0.877, p=0.0000
+Correlation(vol_gap, hedging_pnl): r=0.877
 ```
 
-That's the realized-vs-implied vol P&L relationship holding up out of
-sample, across multiple names, on real data -- not a single cherry-pickable
-window.
+That's the realized-vs-implied vol P&L relationship reproducing on real
+data across multiple names and windows -- not a single cherry-pickable
+window. **Two honesty caveats, stated rather than implied away:** (1) the
+50 ticker-windows are NOT independent observations -- windows overlap
+within each ticker, and the five tickers share the same market vol regime
+(SPY literally contains the other four), so the effective sample size is
+far smaller than 50 and an i.i.d. p-value would be meaningless (none is
+reported for exactly that reason); (2) the relationship being reproduced
+is close to a mechanical identity (Carr & Madan 2002), so this is a
+software-correctness check on real data, not evidence of a tradable edge.
 
 `run_backtest.py`/`StripPricer` (chain snapshots) is the one demo that does
 need an options-capable plan -- see below.
@@ -399,7 +428,11 @@ need an options-capable plan -- see below.
 
 The backtester targets Polygon.io's REST API (the company has since
 rebranded to "Massive", but the API itself is unchanged -- `PolygonProvider`
-still hits `api.polygon.io` and that's confirmed working). Options chain
+still hits `api.polygon.io` and that's confirmed working). The provider
+follows `next_url` pagination to completion (an earlier version fetched a
+single 250-row page and silently truncated large chains -- caught in
+external review, regression-tested against a mocked multi-page session)
+and retries with exponential backoff on rate-limit/5xx responses. Options chain
 data requires at least an "Options Starter" plan (a base-tier key gets a
 `403 NOT_AUTHORIZED` on `/v3/snapshot/options/...`, confirmed against a live
 key); daily underlying price history (`get_price_history`, used by the
@@ -480,3 +513,7 @@ hedger = HedgingBacktester(rate=0.05, transaction_cost_bps=5.0)
 result = hedger.run(price_history, strike=450, expiration=expiration, hedge_vol=0.18)
 attributed = hedger.attribute_pnl(result)  # financing / gamma / theta / transaction cost breakdown
 ```
+
+## License
+
+Apache-2.0 -- see `LICENSE`.

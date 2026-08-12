@@ -141,11 +141,18 @@ double HestonPricer::price(double spot, double strike, double rate, double divid
 
     const double call = spot * std::exp(-dividend_yield * maturity) * p1 -
                          strike * std::exp(-rate * maturity) * p2;
+    // Deep OTM at short maturity, quadrature noise can exceed the (tiny)
+    // true price and produce a slightly NEGATIVE value (observed: -2.3e-7
+    // for a 5-day 200-strike call on spot 100). A negative option price is
+    // itself an arbitrage and poisons downstream IV solves, so clamp both
+    // legs at the no-arbitrage floor of zero.
     if (type == OptionType::Call) {
-        return call;
+        return std::max(call, 0.0);
     }
     // put-call parity, rather than re-deriving a separate put formula
-    return call - spot * std::exp(-dividend_yield * maturity) + strike * std::exp(-rate * maturity);
+    const double put =
+        call - spot * std::exp(-dividend_yield * maturity) + strike * std::exp(-rate * maturity);
+    return std::max(put, 0.0);
 }
 
 bool HestonPricer::satisfies_feller_condition(const HestonParams& hp) {
