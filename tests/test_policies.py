@@ -109,6 +109,22 @@ def test_band_policy_attribution_identity_still_holds():
     assert attr["attribution_error"].abs().sum() < 0.5 * attr["realized_pnl"].abs().sum()
 
 
+def test_risk_aversion_scaling_reproduces_exact_band_multiples():
+    # examples/hedging_policy_frontier_study.py sweeps band width via
+    # risk_aversion = lam0 / c**3, relying on this producing EXACTLY
+    # band(lam0) * c (from h ~ risk_aversion^(-1/3)). This is the load-
+    # bearing identity for that study's entire multiplier grid -- verified
+    # here to more decimal places than the general scaling test above, and
+    # across multiple states/lam0 values.
+    for state in (_state(gamma=0.02, spot=100.0, cost_frac=5e-4),
+                  _state(gamma=0.11, spot=340.0, cost_frac=8e-4)):
+        for lam0 in (0.001, 0.01, 0.1, 1.0):
+            base = WhalleyWilmottPolicy(risk_aversion=lam0).band_half_width(state)
+            for c in (0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0):
+                h = WhalleyWilmottPolicy(risk_aversion=lam0 / c ** 3).band_half_width(state)
+                assert math.isclose(h, c * base, rel_tol=1e-9)
+
+
 def test_callable_policy_wraps_custom_logic():
     p = CallablePolicy(lambda held, state: 0.5 * (held + state.delta))
     assert p.target_shares(0.0, _state(delta=0.8)) == 0.4

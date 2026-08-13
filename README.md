@@ -13,6 +13,39 @@ delta-hedging P&L with pluggable rebalancing policies and full attribution,
 and aggregates portfolio-level risk. See [CHANGELOG.md](CHANGELOG.md) for
 version history.
 
+## Research finding
+
+Most of this project replicates known results correctly (Black-Scholes,
+Heston, SVI, LSM) -- useful for learning, not itself a contribution. One
+piece goes further: **is Whalley & Wilmott's (1997) asymptotically-optimal
+hedging band actually cost-risk-minimizing on real market data, or only
+under the continuous-monitoring assumption it's derived under?**
+
+`examples/hedging_policy_frontier_study.py` sweeps the WW band width
+(via the exact identity `band(risk_aversion = lam0/c^3) = c * band(lam0)`,
+regression-tested in `test_policies.py`) across real daily closes for 5
+liquid names, 50 rolling out-of-sample windows, and 3 risk-aversion
+regimes, scoring each width by the same mean-variance objective (cost +
+lam*variance) the theory itself optimizes.
+
+Two of the three regimes turned out to be cost-dominated -- the objective
+kept improving all the way to the edge of the tested grid, which is a
+methodological trap, not a finding (a wider grid would just move the
+"optimum" again; extending it 4x confirmed exactly that). Only the regime
+where cost and variance are genuinely balanced produces a well-posed
+interior optimum, and that's the one worth trusting: **the empirically
+cost-risk-minimizing band is ~2x wider than the asymptotic theory predicts
+-- a modest (+7%) but statistically real gap** (stationary block-bootstrap
+CI on the objective difference excludes zero: `[0.008, 0.051]`,
+n=50, n_effective≈22). Plausible mechanism, not yet independently
+confirmed: WW's derivation assumes continuous monitoring, and this
+backtest -- like most practical implementations -- only rebalances once a
+day, which can't realize the fine-grained control the continuous-time
+band assumes.
+
+Run it yourself: `python examples/hedging_policy_frontier_study.py`
+(needs `POLYGON_API_KEY`, base equities tier only).
+
 ## Layout
 
 ```

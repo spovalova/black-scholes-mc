@@ -9,6 +9,22 @@ The three capabilities that make the hedging backtester a research
 instrument rather than a demo: optimal rebalancing policies, vega-aware
 attribution, and publication-grade statistics. 18 new tests (76 total).
 
+### Research
+
+- **`examples/hedging_policy_frontier_study.py`**: tests whether
+  Whalley-Wilmott's (1997) asymptotically-optimal hedging band is actually
+  cost-risk-minimizing on real market data (5 tickers, 50 rolling
+  out-of-sample windows), by sweeping the band width via the exact
+  `band(risk_aversion=lam0/c^3) = c*band(lam0)` identity (regression-tested
+  in `test_policies.py`) and scoring against the same mean-variance
+  objective the theory optimizes. Finding: 2 of 3 tested risk-aversion
+  regimes were cost-dominated (objective still improving at the grid edge
+  even after a 4x wider search -- a methodological artifact, reported as
+  such rather than as a result). The one well-posed regime shows a real,
+  small (+7%) gap: the empirically-optimal band is ~2x wider than theory,
+  statistically distinguishable from zero via stationary block bootstrap.
+  See the README's "Research finding" section.
+
 ### Added
 
 - **`bscpp.backtest.policies`** -- the rebalancing-policy ladder from the
