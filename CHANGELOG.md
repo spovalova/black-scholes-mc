@@ -48,6 +48,20 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
   dependent-correlation CIs (shown to avoid false certainty on
   independent-but-autocorrelated noise). No function returns a bare
   p-value; result objects carry their assumptions in their repr.
+- **`heston_price_batch`**: profiling `calibrate_heston` (cProfile) showed
+  `heston_price` consuming 96.8% of runtime; since the Heston
+  characteristic function doesn't depend on strike, batching shares CF
+  evaluations across a strike grid over a fixed (not adaptive) quadrature.
+  A naively high-resolution fixed grid was tried first and was *slower*
+  than the original per-strike loop (449ms vs. 217ms) -- adaptive
+  quadrature is already cheap at typical parameters, so a safety-
+  conservative fixed grid's per-call cost dominated at only 13 strikes.
+  Made resolution configurable instead; a maturity-and-vol-of-vol sweep
+  against the trusted adaptive price found a fast low-resolution default
+  degrades independently under short maturity or high xi, so
+  `calibrate_heston` now auto-selects resolution per calibration call.
+  Net: 254ms -> 82ms (3.1x) on a 9-strike calibration, fitted parameters
+  and RMSE unchanged (regression-tested).
 
 ### Fixed
 

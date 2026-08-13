@@ -4,6 +4,7 @@
 #include <cmath>
 #include <complex>
 #include <functional>
+#include <stdexcept>
 
 namespace bscpp {
 
@@ -76,6 +77,27 @@ double integrate_to_infinity(const std::function<double(double)>& f, double tol)
         }
     }
     return total;
+}
+
+// Fixed composite-Simpson quadrature nodes and weights on [a, b] with n
+// (even) subintervals -- used only by price_batch, where nodes must be
+// IDENTICAL across strikes so the (expensive) characteristic-function
+// evaluation at each node can be shared. Deliberately generous, fixed
+// resolution rather than a memorized table of magic numbers; validated
+// against the adaptive single-price path across the same stress cases
+// price() itself was verified against (see test_heston.py) rather than
+// assumed to inherit that accuracy for free.
+void fixed_simpson_grid(double a, double b, int n, std::vector<double>& nodes,
+                         std::vector<double>& weights) {
+    if (n % 2 != 0) ++n;
+    const double h = (b - a) / n;
+    nodes.resize(static_cast<size_t>(n) + 1);
+    weights.resize(static_cast<size_t>(n) + 1);
+    for (int k = 0; k <= n; ++k) {
+        nodes[static_cast<size_t>(k)] = a + k * h;
+        const double w = (k == 0 || k == n) ? 1.0 : (k % 2 == 0 ? 2.0 : 4.0);
+        weights[static_cast<size_t>(k)] = w * h / 3.0;
+    }
 }
 
 }  // namespace
@@ -153,6 +175,57 @@ double HestonPricer::price(double spot, double strike, double rate, double divid
     const double put =
         call - spot * std::exp(-dividend_yield * maturity) + strike * std::exp(-rate * maturity);
     return std::max(put, 0.0);
+}
+
+std::vector<double> HestonPricer::price_batch(double spot, const std::vector<double>& strikes,
+                                               const std::vector<OptionType>& types, double rate,
+                                               double dividend_yield, double maturity,
+                                               const HestonParams& hp, int num_nodes,
+                                               double phi_max) {
+    if (strikes.size() != types.size()) {
+        throw std::invalid_argument("strikes and types must be the same length");
+    }
+
+    constexpr double kEps = 1e-8;
+    std::vector<double> nodes, weights;
+    fixed_simpson_grid(kEps, phi_max, num_nodes, nodes, weights);
+
+    // The expensive part -- complex sqrt/log/exp inside char_function --
+    // evaluated once per node, shared across every strike below, since
+    // char_function does not depend on strike at all.
+    std::vector<cdouble> cf1(nodes.size()), cf2(nodes.size());
+    for (size_t k = 0; k < nodes.size(); ++k) {
+        const cdouble phi(nodes[k], 0.0);
+        cf1[k] = char_function(phi, spot, rate, dividend_yield, maturity, hp, 1);
+        cf2[k] = char_function(phi, spot, rate, dividend_yield, maturity, hp, 2);
+    }
+
+    const cdouble i(0.0, 1.0);
+    const double disc_q = std::exp(-dividend_yield * maturity);
+    const double disc_r = std::exp(-rate * maturity);
+
+    std::vector<double> out(strikes.size());
+    for (size_t s = 0; s < strikes.size(); ++s) {
+        const double log_strike = std::log(strikes[s]);
+        double integral1 = 0.0, integral2 = 0.0;
+        for (size_t k = 0; k < nodes.size(); ++k) {
+            const cdouble phi(nodes[k], 0.0);
+            const cdouble phase = std::exp(-i * phi * log_strike);
+            integral1 += weights[k] * (phase * cf1[k] / (i * phi)).real();
+            integral2 += weights[k] * (phase * cf2[k] / (i * phi)).real();
+        }
+        const double p1 = 0.5 + integral1 / kPi;
+        const double p2 = 0.5 + integral2 / kPi;
+
+        const double call = spot * disc_q * p1 - strikes[s] * disc_r * p2;
+        if (types[s] == OptionType::Call) {
+            out[s] = std::max(call, 0.0);
+        } else {
+            const double put = call - spot * disc_q + strikes[s] * disc_r;
+            out[s] = std::max(put, 0.0);
+        }
+    }
+    return out;
 }
 
 bool HestonPricer::satisfies_feller_condition(const HestonParams& hp) {

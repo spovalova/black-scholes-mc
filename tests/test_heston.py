@@ -13,6 +13,7 @@ from bscpp.backtest import (
     calibrate_heston_with_stability,
     heston_fit_rmse,
 )
+from bscpp.backtest.heston_calibration import _batch_resolution_for_maturity
 
 
 def test_heston_collapses_to_black_scholes_as_vol_of_vol_shrinks():
@@ -73,6 +74,82 @@ def test_heston_analytic_stable_at_very_short_maturity():
     price = bscpp.heston_price(spot, strike, rate, div, 1 / 365, bscpp.OptionType.Call, hp)
     bs_reference = bscpp.price(spot, strike, rate, math.sqrt(v0), 1 / 365, "call", div)
     assert math.isclose(price, bs_reference, abs_tol=5e-3)
+
+
+def test_batch_resolution_scales_up_below_fourteen_days_or_above_xi_one():
+    # Both thresholds are load-bearing, not just the maturity one: below
+    # 14 days, calibrate_heston relies on the fast (1500, 150) default
+    # being accurate, and the maturity sweep behind this policy showed it
+    # degrading sharply under ~5 days. Separately, a fixed-maturity sweep
+    # over xi found the same default *also* breaks down as vol-of-vol
+    # rises regardless of maturity -- a maturity-only policy would wrongly
+    # call a long-dated, high-xi contract safe.
+    assert _batch_resolution_for_maturity(45 / 365, xi=0.4) == (1500, 150.0)
+    assert _batch_resolution_for_maturity(10 / 365, xi=0.4) == (8000, 800.0)
+    assert _batch_resolution_for_maturity(13.9 / 365, xi=0.4) == (8000, 800.0)
+    assert _batch_resolution_for_maturity(1 / 365, xi=0.4) == (8000, 800.0)
+    assert _batch_resolution_for_maturity(1.0, xi=1.0) == (1500, 150.0)
+    assert _batch_resolution_for_maturity(1.0, xi=1.01) == (8000, 800.0)
+    assert _batch_resolution_for_maturity(1.0, xi=3.0) == (8000, 800.0)
+
+
+def test_heston_price_batch_accurate_at_the_resolution_policy_actually_selects():
+    # Directly exercises what calibrate_heston will actually call: for a
+    # maturity on each side of the 7-day threshold, price_batch AT the
+    # resolution _batch_resolution_for_maturity picks for it must stay
+    # close to the trusted adaptive price -- not just "some resolution
+    # exists that works," but the one the policy actually selects.
+    spot, rate, div = 100.0, 0.05, 0.0
+    strikes = [80, 90, 100, 110, 120]
+    types = [bscpp.OptionType.Call] * 5
+
+    for maturity, hp in [
+        (45 / 365, bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.04)),
+        (2 / 365, bscpp.HestonParams(kappa=5.0, theta=0.04, xi=3.0, rho=-0.5, v0=0.04)),
+    ]:
+        num_nodes, phi_max = _batch_resolution_for_maturity(maturity, hp.xi)
+        batch = bscpp.heston_price_batch(spot, strikes, types, rate, div, maturity, hp,
+                                          num_nodes, phi_max)
+        single = [bscpp.heston_price(spot, k, rate, div, maturity, t, hp)
+                  for k, t in zip(strikes, types)]
+        for b, s in zip(batch, single):
+            assert math.isclose(b, s, abs_tol=1e-3, rel_tol=1e-3)
+
+
+def test_heston_price_batch_matches_single_price_across_stress_regimes():
+    # price_batch shares characteristic-function evaluations across strikes
+    # via a FIXED (not adaptive) quadrature grid -- verified here against
+    # the trusted adaptive heston_price across the exact same stress cases
+    # that pricer was itself validated against, not assumed to inherit
+    # that accuracy for free. Each regime is given the quadrature
+    # resolution _batch_resolution_for_maturity would actually select for
+    # it -- the raw C++ default (1500, 150) is tuned for typical
+    # calibration use and is deliberately NOT safe at short maturity (see
+    # test_batch_resolution_scales_up_below_seven_days); this test checks
+    # accuracy is achievable at adequate resolution, not that the default
+    # happens to be enough everywhere.
+    spot, rate, div = 100.0, 0.05, 0.0
+    strikes = [60, 70, 80, 90, 95, 100, 105, 110, 120, 130, 150]
+    types = [bscpp.OptionType.Call] * 6 + [bscpp.OptionType.Put] * 5
+
+    regimes = [
+        ("normal", 1.0, bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)),
+        ("1-day maturity", 1 / 365,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.04)),
+        ("Feller-violating", 1.0,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=3.0, rho=-0.7, v0=0.04)),
+        ("worst case: 1-day + xi=3.0", 1 / 365,
+         bscpp.HestonParams(kappa=5.0, theta=0.04, xi=3.0, rho=-0.5, v0=0.04)),
+    ]
+
+    for name, maturity, hp in regimes:
+        num_nodes, phi_max = _batch_resolution_for_maturity(maturity, hp.xi)
+        batch = bscpp.heston_price_batch(spot, strikes, types, rate, div, maturity, hp,
+                                          num_nodes, phi_max)
+        single = [bscpp.heston_price(spot, k, rate, div, maturity, t, hp)
+                  for k, t in zip(strikes, types)]
+        for b, s in zip(batch, single):
+            assert math.isclose(b, s, abs_tol=1e-4, rel_tol=1e-4), name
 
 
 def test_heston_matches_independent_monte_carlo():

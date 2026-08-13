@@ -24,6 +24,7 @@ from bscpp._core import (
     bs_price_with_greeks,
     bs_price_with_greeks_batch,
     heston_price,
+    heston_price_batch,
     heston_satisfies_feller_condition,
 )
 from bscpp.risk import Breach, Position, PortfolioRiskManager, RiskLimits
@@ -57,6 +58,7 @@ __all__ = [
     "HestonMCPricer",
     "HestonParams",
     "heston_price",
+    "heston_price_batch",
     "heston_satisfies_feller_condition",
     "make_inputs",
     "price",

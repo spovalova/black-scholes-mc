@@ -115,6 +115,12 @@ PYBIND11_MODULE(_core, m) {
     m.def("heston_price", &HestonPricer::price, py::arg("spot"), py::arg("strike"),
           py::arg("rate"), py::arg("dividend_yield"), py::arg("maturity"), py::arg("type"),
           py::arg("params"));
+    m.def("heston_price_batch", &HestonPricer::price_batch, py::arg("spot"), py::arg("strikes"),
+          py::arg("types"), py::arg("rate"), py::arg("dividend_yield"), py::arg("maturity"),
+          py::arg("params"), py::arg("num_nodes") = 1500, py::arg("phi_max") = 150.0,
+          "Prices a whole strike grid in one call, sharing characteristic-function "
+          "evaluations across strikes -- see heston.hpp for why this is faster, not just "
+          "more convenient, than calling heston_price in a loop, and for when it isn't.");
     m.def("heston_satisfies_feller_condition", &HestonPricer::satisfies_feller_condition,
           py::arg("params"));
 

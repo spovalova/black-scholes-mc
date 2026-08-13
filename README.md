@@ -201,6 +201,22 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   `calibrate_heston_with_stability` runs several perturbed initial
   guesses and reports whether fit quality *and* the parameters themselves
   are stable across starts.
+- `heston_price_batch` prices a whole strike grid in one call by sharing
+  characteristic-function evaluations across strikes (the CF doesn't
+  depend on strike, only its phase factor does) over a fixed, not
+  adaptive, quadrature grid -- profiling showed `heston_price` accounting
+  for 96.8% of a calibration call's runtime, and `calibrate_heston` now
+  uses this path internally. Fixed quadrature can't inherit the adaptive
+  pricer's self-terminating accuracy for free, so resolution is chosen by
+  measured error rather than assumed: a maturity **and** vol-of-vol sweep
+  against the adaptive price found both short maturity and high xi
+  independently degrade a fast, cheap grid, so `calibrate_heston` falls
+  back to a validated-accurate higher-resolution grid outside that
+  regime. Net effect on a 9-strike calibration: 254ms -> 82ms (3.1x),
+  fitted parameters and fit RMSE unchanged. See
+  `_batch_resolution_for_maturity` in `heston_calibration.py` for the
+  measured thresholds and a disclosed residual limitation at
+  near-degenerate correlation.
 - `heston_satisfies_feller_condition`: checks `2*kappa*theta >= xi^2` as a
   diagnostic (many market-calibrated fits violate it in practice).
 
