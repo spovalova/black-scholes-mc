@@ -79,7 +79,14 @@ class StripPricer:
         # rows in needs_solve & ~has_mid have neither a quote nor a usable
         # mid to solve from; they keep the 0.20 placeholder below.
 
-        model_ivs = np.where(needs_solve, 0.20, given_iv)  # placeholder for solved/fallback rows
+        # iv_source per row: "quoted" (vendor IV used as-is), "solved" (we
+        # solved it from the mid), or "fallback" (no usable quote OR the
+        # solve failed). Fallback rows get model_iv = NaN and NaN pricing
+        # outputs below -- the previous behavior silently priced them at an
+        # invented 0.20 vol with no flag, contaminating every downstream
+        # consumer (SVI fits, calibration, error stats) with fake IVs.
+        iv_source = np.where(needs_solve, "fallback", "quoted").astype(object)
+        model_ivs = np.where(needs_solve, np.nan, given_iv)
         if solve_mask.any():
             idx = np.flatnonzero(solve_mask)
             seed_inputs = [
@@ -89,35 +96,52 @@ class StripPricer:
             ]
             solved = bscpp.bs_implied_vol_batch(seed_inputs, [mid[i] for i in idx])
             for i, iv in zip(idx, solved):
-                model_ivs[i] = iv if iv == iv else 0.20  # NaN check -> fallback
+                if iv == iv:  # solve succeeded
+                    model_ivs[i] = iv
+                    iv_source[i] = "solved"
+                # else: leave NaN / "fallback" -- a failed solve means the
+                # mid itself is outside what any vol could produce.
 
         # --- batch price + Greeks for the whole chain in one C++ call ---
+        # Fallback rows have no real IV; price them at a harmless placeholder
+        # then overwrite their outputs with NaN below so nothing downstream
+        # can mistake them for data.
+        priceable = model_ivs == model_ivs  # not-NaN mask
+        safe_ivs = np.where(priceable, model_ivs, 0.20)
         inputs_list = [
-            bscpp.make_inputs(spot, chain["strike"].iat[i], self.rate, model_ivs[i], t_years,
+            bscpp.make_inputs(spot, chain["strike"].iat[i], self.rate, safe_ivs[i], t_years,
                                otypes[i], self.dividend_yield)
             for i in range(len(chain))
         ]
         results = bscpp.bs_price_with_greeks_batch(inputs_list)
 
         if use_mc:
-            mc_results = [self.mc.price_european(inp, self.mc_paths, True) for inp in inputs_list]
-            mc_prices = [r.price for r in mc_results]
-            mc_errs = [r.std_error for r in mc_results]
+            mc_results = [
+                self.mc.price_european(inp, self.mc_paths, True) if priceable[i] else None
+                for i, inp in enumerate(inputs_list)
+            ]
+            mc_prices = [r.price if r else float("nan") for r in mc_results]
+            mc_errs = [r.std_error if r else float("nan") for r in mc_results]
         else:
             mc_prices = [float("nan")] * len(chain)
             mc_errs = [float("nan")] * len(chain)
 
+        nan_if_fallback = lambda vals: [  # noqa: E731
+            v if priceable[i] else float("nan") for i, v in enumerate(vals)
+        ]
+
         chain["spot"] = spot
         chain["T"] = t_years
         chain["model_iv"] = model_ivs
-        chain["bs_price"] = [r.price for r in results]
+        chain["iv_source"] = iv_source
+        chain["bs_price"] = nan_if_fallback([r.price for r in results])
         chain["mc_price"] = mc_prices
         chain["mc_std_error"] = mc_errs
-        chain["delta"] = [r.greeks.delta for r in results]
-        chain["gamma"] = [r.greeks.gamma for r in results]
-        chain["vega"] = [r.greeks.vega for r in results]
-        chain["theta"] = [r.greeks.theta for r in results]
-        chain["rho"] = [r.greeks.rho for r in results]
+        chain["delta"] = nan_if_fallback([r.greeks.delta for r in results])
+        chain["gamma"] = nan_if_fallback([r.greeks.gamma for r in results])
+        chain["vega"] = nan_if_fallback([r.greeks.vega for r in results])
+        chain["theta"] = nan_if_fallback([r.greeks.theta for r in results])
+        chain["rho"] = nan_if_fallback([r.greeks.rho for r in results])
         chain["bs_error_vs_market"] = chain["bs_price"] - chain["mid"]
         chain["bs_error_pct"] = chain["bs_error_vs_market"] / chain["mid"]
 

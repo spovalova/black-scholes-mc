@@ -159,9 +159,30 @@ def svi_gatheral_jacquier_check(
     everywhere is the complete butterfly-arbitrage-free criterion here.
     """
     k = np.linspace(k_range[0], k_range[1], n_points)
+
+    # PRECONDITION (real bug caught in external review): the g(k) >= 0
+    # criterion is only meaningful where total variance w(k) > 0. A slice
+    # with negative total variance ANYWHERE is an outright arbitrage
+    # (negative implied variance) regardless of what g(k) evaluates to --
+    # and g(k) divides by w, so its value on such a slice is garbage.
+    # Check the closed-form global minimum of w first.
+    min_w = svi_min_total_variance(svi)
+    w_grid = svi.total_variance(k)
+    min_w_on_grid = float(np.min(w_grid))
+    if min_w < 0.0 or min_w_on_grid <= 0.0:
+        return {
+            "min_g": float("nan"),
+            "arbitrage_free": False,
+            "reason": "negative_total_variance",
+            "min_total_variance": float(min(min_w, min_w_on_grid)),
+            "k_grid": k,
+            "g_values": np.full_like(k, np.nan),
+        }
+
     g = svi_g_function(svi, k)
     min_g = float(np.min(g))
-    return {"min_g": min_g, "arbitrage_free": bool(min_g >= 0.0), "k_grid": k, "g_values": g}
+    return {"min_g": min_g, "arbitrage_free": bool(min_g >= 0.0),
+            "min_total_variance": float(min_w), "k_grid": k, "g_values": g}
 
 
 def svi_butterfly_arbitrage_check(
@@ -199,6 +220,21 @@ def svi_butterfly_arbitrage_check(
 
     forward = spot * np.exp((rate - dividend_yield) * svi.t)
     k = np.linspace(k_range[0], k_range[1], n_points)
+
+    # Same precondition as svi_gatheral_jacquier_check: negative total
+    # variance anywhere is already an arbitrage (and implied_vol() would
+    # silently clamp it to 0, masking the violation from the density scan).
+    min_w = svi_min_total_variance(svi)
+    if min_w < 0.0 or float(np.min(svi.total_variance(k))) <= 0.0:
+        return {
+            "min_density": float("nan"),
+            "arbitrage_free": False,
+            "reason": "negative_total_variance",
+            "min_total_variance": float(min_w),
+            "strikes": forward * np.exp(k),
+            "density": np.full(n_points, np.nan),
+        }
+
     strikes = forward * np.exp(k)
     ivs = svi.implied_vol(k)
 

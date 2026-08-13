@@ -1,5 +1,12 @@
 """Black-Scholes analytic pricing + Monte Carlo simulation, backed by a C++ core."""
 
+try:
+    from importlib.metadata import version as _pkg_version
+
+    __version__ = _pkg_version("bscpp")
+except Exception:  # pragma: no cover - not installed as a distribution
+    __version__ = "0.0.0.dev0"
+
 from bscpp._core import (
     AmericanPricer,
     Greeks,

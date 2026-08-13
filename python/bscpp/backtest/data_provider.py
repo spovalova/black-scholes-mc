@@ -65,7 +65,8 @@ class PolygonProvider(DataProvider):
 
     BASE_URL = "https://api.polygon.io"
 
-    def __init__(self, api_key: str | None = None, session: requests.Session | None = None):
+    def __init__(self, api_key: str | None = None, session: requests.Session | None = None,
+                 max_retries: int = 3):
         self.api_key = api_key or os.environ.get("POLYGON_API_KEY")
         if not self.api_key:
             raise ValueError(
@@ -73,13 +74,61 @@ class PolygonProvider(DataProvider):
                 "(or a .env file) or pass api_key= explicitly."
             )
         self.session = session or requests.Session()
+        self.max_retries = max_retries
 
-    def _get(self, path: str, params: dict | None = None) -> dict:
+    def _get_one(self, url: str, params: dict | None = None) -> dict:
+        """One GET with retry/backoff on 429 (rate limit) and 5xx errors."""
+        import time
+
         params = dict(params or {})
         params["apiKey"] = self.api_key
-        resp = self.session.get(f"{self.BASE_URL}{path}", params=params, timeout=15)
-        resp.raise_for_status()
-        return resp.json()
+        last_exc: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                resp = self.session.get(url, params=params, timeout=15)
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    resp.raise_for_status()
+                resp.raise_for_status()
+                return resp.json()
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                # 4xx other than 429 are permanent (bad key, no entitlement,
+                # bad params) -- retrying only burns rate limit. Fail fast.
+                if status is not None and 400 <= status < 500 and status != 429:
+                    raise
+                last_exc = exc
+            except requests.ConnectionError as exc:
+                last_exc = exc
+            if attempt < self.max_retries:
+                time.sleep(min(2.0 ** attempt, 8.0))  # 1s, 2s, 4s, capped
+        raise last_exc  # type: ignore[misc]
+
+    def _get(self, path: str, params: dict | None = None) -> dict:
+        """GET a (possibly paginated) endpoint, following next_url cursors.
+
+        Polygon/Massive v3 endpoints paginate: each page carries a
+        `next_url` while more results remain, and `results` must be
+        concatenated across pages. The previous implementation fetched ONE
+        page with limit=250 and silently truncated -- a real bug for any
+        large underlying (an SPY expiry alone has far more than 250
+        contracts). `apiKey` must be re-appended to each next_url fetch.
+        """
+        data = self._get_one(f"{self.BASE_URL}{path}", params=params)
+        if "results" not in data or not isinstance(data.get("results"), list):
+            return data
+
+        results = list(data["results"])
+        next_url = data.get("next_url")
+        pages = 1
+        max_pages = 200  # backstop: 200 pages x 250 rows = 50k rows per query
+        while next_url and pages < max_pages:
+            data = self._get_one(next_url)
+            results.extend(data.get("results", []))
+            next_url = data.get("next_url")
+            pages += 1
+
+        data["results"] = results
+        return data
 
     def get_underlying_price(self, ticker: str, as_of: dt.date | None = None) -> float:
         if as_of is None:
