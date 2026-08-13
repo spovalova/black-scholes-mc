@@ -30,11 +30,16 @@ python/bscpp/                 Python package (imports the compiled extension)
   strategies.py                 multi-leg strategies: straddle/strangle/vertical/
                                  strip/strap/butterfly, net Greeks, exact breakevens
   risk.py                        portfolio Greeks aggregation + configurable limit checks
+  stats.py                       honest inference for dependent data: effective sample
+                                  size, Newey-West HAC t-stats, stationary block
+                                  bootstrap, dependent-correlation CIs
   backtest/
     data_provider.py            DataProvider interface: PolygonProvider, MockProvider
     engine.py                    StripPricer / Backtester -- chain pricing vs. market
     hedging.py                   HedgingBacktester -- delta-hedging P&L, transaction
-                                  costs, and attribution
+                                  costs, vega-aware attribution, pluggable policies
+    policies.py                  rebalancing policies: exact-delta, fixed band, and
+                                  Whalley-Wilmott (1997) asymptotically-optimal band
     vol_surface.py                SVI fitting + two independent arbitrage checks
     heston_calibration.py          fits Heston params to a chain's implied vols,
                                     with regularization + a stability diagnostic
@@ -184,11 +189,34 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   with an exact known realized vol, `financing+gamma+theta` matches
   **Carr & Madan's (2002)** canonical closed-form limit
   `0.5*Gamma*S^2*(hedge_vol^2 - realized_vol^2)*dt` to within ~0.5%.
-- Known gap: `hedge_vol` is constant for the life of a run, so vega P&L is
-  zero by construction, not by measurement -- on a real book, day-to-day
-  vol re-marking is often the *dominant* source of daily option P&L, which
-  this decomposition doesn't yet capture (documented in the method's
-  docstring).
+- **Re-marked vols and vega P&L** (closes what used to be a documented
+  gap): `hedge_vol` can be a time series, in which case the option is
+  re-marked at each date's vol and `attribute_pnl` reports the re-marking
+  P&L as an explicit **vega term** -- verified to leave the accounting
+  identity intact, to explain the realized P&L where excluding it blows
+  the residual up >2x, and to be identically zero in the constant-vol
+  configuration (exact backward compatibility).
+- **Rebalancing policies** (`bscpp.backtest.policies`): the hedge *timing*
+  ladder the transaction-cost literature settled and almost nothing open
+  implements -- rebalance-to-delta baseline, fixed no-trade band (trade to
+  the nearest edge on breach), and the **Whalley-Wilmott (1997)**
+  asymptotically-optimal band with its published Gamma^(2/3) and
+  cost^(1/3) scalings (verified numerically to <1e-9 relative error).
+  Band policies cut total spread cost >30% vs. daily rebalancing on
+  simulated paths in this suite's own tests; a `delta_gap_pnl` attribution
+  term accounts exactly for the first-order P&L of sitting away from the
+  model delta inside the band. `CallablePolicy` lets custom or learned
+  (e.g. RL) policies plug into the same interface for apples-to-apples
+  comparison against the classical ladder.
+- **Honest statistics** (`bscpp.stats`): effective sample size, Newey-West
+  HAC t-stats, the Politis-Romano stationary block bootstrap, and
+  dependent-correlation CIs. The real-data validation study now reports a
+  block-bootstrap CI and its effective sample size instead of an i.i.d.
+  p-value (which is meaningless for overlapping windows on co-moving
+  tickers, and is therefore no longer printed anywhere). Design rule: no
+  function in `bscpp.stats` returns a bare p-value -- every result object
+  carries its assumptions (HAC lags, block length, effective N) in its
+  repr, so the number can't be quoted without its caveats.
 
 **Chain pricing vs. real market data** (`bscpp.backtest.engine`)
 - `StripPricer`/`Backtester`: pull a chain slice from a `DataProvider`,

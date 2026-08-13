@@ -187,3 +187,51 @@ def test_realized_vs_implied_experiment_transaction_costs_reduce_every_pnl():
     )
     shift = frictionless["mean_hedging_pnl"].to_numpy() - with_cost["mean_hedging_pnl"].to_numpy()
     assert (shift > 0).all()  # costs strictly reduce P&L at every realized-vol level
+
+
+def test_vega_pnl_zero_with_constant_vol_and_active_with_remarked_vol():
+    # Constant hedge_vol: vega_pnl must be identically zero and the
+    # attribution must match the historical (pre-vega) behavior. Re-marked
+    # (time-varying) hedge_vol: the option's day-over-day re-marking P&L
+    # must be captured by an explicit vega term, not dumped into the
+    # residual -- on a real book re-marking is often the DOMINANT term.
+    rng = np.random.default_rng(21)
+    dates = pd.date_range(dt.date.today(), periods=40, freq="D")
+    vol = 0.30
+    dt_frac = 1 / 365
+    rets = rng.normal((0.05 - 0.5 * vol**2) * dt_frac, vol * np.sqrt(dt_frac), size=39)
+    prices = pd.Series(100 * np.exp(np.concatenate([[0], np.cumsum(rets)])), index=dates)
+
+    bt = HedgingBacktester(rate=0.05)
+
+    flat = bt.attribute_pnl(bt.run(prices, 100, dates[-1].date(), 0.30))
+    assert float(flat["vega_pnl"].abs().sum()) == 0.0
+
+    # a vol path that drifts up then down around 0.30
+    vol_path = pd.Series(0.30 + 0.06 * np.sin(np.linspace(0, 3.0, len(dates))), index=dates)
+    marked = bt.run(prices, 100, dates[-1].date(), vol_path)
+    attr = bt.attribute_pnl(marked)
+
+    assert attr["vega_pnl"].abs().sum() > 0.1  # genuinely active
+    # accounting identity is untouched
+    assert math.isclose(attr["realized_pnl"].sum(), marked["portfolio_value"].iloc[-1],
+                         abs_tol=1e-9)
+    # with the vega term INCLUDED the decomposition must still explain most
+    # of realized P&L; with it EXCLUDED the residual would blow up -- check
+    # both directions to prove the term is doing real work.
+    err_with = attr["attribution_error"].abs().sum()
+    err_without = (attr["realized_pnl"] - (attr["predicted_pnl"] - attr["vega_pnl"])).abs().sum()
+    assert err_with < 0.5 * attr["realized_pnl"].abs().sum()
+    assert err_without > 2.0 * err_with
+
+
+def test_hedge_vol_series_must_cover_all_dates():
+    dates = pd.date_range(dt.date.today(), periods=10, freq="D")
+    prices = pd.Series(100.0, index=dates)
+    partial_vol = pd.Series(0.2, index=dates[:5])
+    bt = HedgingBacktester(rate=0.05)
+    try:
+        bt.run(prices, 100, dates[-1].date(), partial_vol)
+        assert False, "expected ValueError for partial hedge_vol coverage"
+    except ValueError:
+        pass

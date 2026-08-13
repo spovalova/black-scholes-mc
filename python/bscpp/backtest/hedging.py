@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 
 import bscpp
+from bscpp.backtest.policies import DeltaPolicy, HedgeState
 
 
 class HedgingBacktester:
@@ -57,38 +58,69 @@ class HedgingBacktester:
         price_path: pd.Series,
         strike: float,
         expiration: dt.date,
-        hedge_vol: float,
+        hedge_vol,
         option_type: str = "call",
+        policy=None,
     ) -> pd.DataFrame:
-        """Replicate the standard "sell option, delta-hedge daily" accounting.
+        """Replicate the standard "sell option, delta-hedge" accounting.
 
         Convention: we sell 1 option for its Black-Scholes premium at
-        hedge_vol, and hold delta shares of the underlying financed out of
-        a cash account that accrues at `rate`. `portfolio_value` is the
-        hedged position's mark-to-market P&L since inception (cash + stock
-        - option liability); it is exactly 0 on day 0 by construction, so
-        it doubles as the cumulative hedging P&L series.
+        hedge_vol, and hold shares of the underlying (chosen by `policy`)
+        financed out of a cash account that accrues at `rate`.
+        `portfolio_value` is the hedged position's mark-to-market P&L since
+        inception (cash + stock - option liability); it is exactly 0 on day
+        0 by construction, so it doubles as the cumulative hedging P&L
+        series.
+
+        hedge_vol: a float (constant marking vol -- vega P&L is then zero
+        by construction), or a pd.Series aligned/alignable to
+        price_path.index (a re-marked vol path -- e.g. trailing realized or
+        an implied-vol series). With a Series, the option is re-marked at
+        each date's vol, and `attribute_pnl` reports the resulting vega
+        P&L as an explicit term instead of silently burying the (often
+        DOMINANT) re-marking P&L in the residual.
+
+        policy: an object with `target_shares(held, state) -> float`
+        deciding the post-observation stock position -- see
+        bscpp.backtest.policies (DeltaPolicy, BandPolicy,
+        WhalleyWilmottPolicy, CallablePolicy). Default: DeltaPolicy
+        (rebalance to the exact delta every observation), which reproduces
+        the classic daily-rebalanced backtest.
         """
         dates = list(price_path.index)
         if len(dates) < 2:
             raise ValueError("price_path needs at least 2 observations")
 
+        policy = policy or DeltaPolicy()
         cost_frac = self.transaction_cost_bps / 10_000.0
 
+        if isinstance(hedge_vol, pd.Series):
+            vols = hedge_vol.reindex(price_path.index)
+            if vols.isna().any():
+                raise ValueError("hedge_vol series does not cover every price_path date")
+            vols = vols.astype(float)
+        else:
+            vols = pd.Series(float(hedge_vol), index=price_path.index)
+
         spot0 = float(price_path.iloc[0])
+        vol0 = float(vols.iloc[0])
         t0 = max((expiration - dates[0].date()).days, 1) / 365.0
-        inputs0 = bscpp.make_inputs(spot0, strike, self.rate, hedge_vol, t0, option_type,
+        inputs0 = bscpp.make_inputs(spot0, strike, self.rate, vol0, t0, option_type,
                                      self.dividend_yield)
         result0 = bscpp.bs_price_with_greeks(inputs0)
 
-        shares = result0.greeks.delta
+        state0 = HedgeState(t=t0, spot=spot0, delta=result0.greeks.delta,
+                            gamma=result0.greeks.gamma, vega=result0.greeks.vega,
+                            rate=self.rate, cost_frac=cost_frac)
+        shares = policy.target_shares(0.0, state0)
         cost0 = abs(shares) * spot0 * cost_frac  # crossing the spread to establish the hedge
         cash = result0.price - shares * spot0 - cost0
         spot_prev = spot0
 
         rows = [{
-            "date": dates[0], "spot": spot0, "T": t0, "delta": shares,
+            "date": dates[0], "spot": spot0, "T": t0, "delta": result0.greeks.delta,
             "gamma": result0.greeks.gamma, "theta": result0.greeks.theta,
+            "vega": result0.greeks.vega, "hedge_vol": vol0,
             "option_value": result0.price, "cash": cash, "shares": shares,
             "transaction_cost": cost0,
             "portfolio_value": cash + shares * spot0 - result0.price,
@@ -97,6 +129,7 @@ class HedgingBacktester:
         for i in range(1, len(dates)):
             date = dates[i]
             spot = float(price_path.iloc[i])
+            vol = float(vols.iloc[i])
             elapsed_days = (dates[i] - dates[i - 1]).days or 1
             dt_years = elapsed_days / 365.0
             cash *= math.exp(self.rate * dt_years)
@@ -114,22 +147,26 @@ class HedgingBacktester:
                 cost = abs(shares) * spot * cost_frac  # crossing the spread to unwind the hedge
                 cash += shares * spot - cost  # liquidate the hedge; the unified formula
                 shares, option_value = 0.0, payoff  # below nets out -option_value (=payoff) once
-                gamma, theta = 0.0, 0.0  # degenerate at expiry; unused past this row anyway
+                delta, gamma, theta, vega = 0.0, 0.0, 0.0, 0.0  # degenerate at expiry
+                vol = float(vols.iloc[i - 1])  # no re-mark at expiry: payoff has no vol
             else:
-                inputs = bscpp.make_inputs(spot, strike, self.rate, hedge_vol, t, option_type,
+                inputs = bscpp.make_inputs(spot, strike, self.rate, vol, t, option_type,
                                             self.dividend_yield)
                 result = bscpp.bs_price_with_greeks(inputs)
                 option_value = result.price
-                new_delta = result.greeks.delta
-                gamma, theta = result.greeks.gamma, result.greeks.theta
-                cost = abs(new_delta - shares) * spot * cost_frac  # crossing the spread to rebalance
-                cash -= (new_delta - shares) * spot + cost  # buy/sell the delta change, pay the spread
-                shares = new_delta
+                delta, gamma = result.greeks.delta, result.greeks.gamma
+                theta, vega = result.greeks.theta, result.greeks.vega
+                state = HedgeState(t=t, spot=spot, delta=delta, gamma=gamma, vega=vega,
+                                   rate=self.rate, cost_frac=cost_frac)
+                new_shares = policy.target_shares(shares, state)
+                cost = abs(new_shares - shares) * spot * cost_frac  # crossing the spread
+                cash -= (new_shares - shares) * spot + cost  # trade the change, pay the spread
+                shares = new_shares
 
             portfolio_value = cash + shares * spot - option_value
             rows.append({
-                "date": date, "spot": spot, "T": t, "delta": shares,
-                "gamma": gamma, "theta": theta,
+                "date": date, "spot": spot, "T": t, "delta": delta,
+                "gamma": gamma, "theta": theta, "vega": vega, "hedge_vol": vol,
                 "option_value": option_value, "cash": cash, "shares": shares,
                 "transaction_cost": cost,
                 "portfolio_value": portfolio_value,
@@ -178,14 +215,21 @@ class HedgingBacktester:
         it enters `predicted_pnl` unchanged rather than as part of the
         residual.
 
-        Known gap: `hedge_vol` is constant for the life of a run, so vega
-        P&L is exactly zero here by construction, not by finding it small.
-        On a real book, day-to-day vol re-marking is often the DOMINANT
-        source of daily option P&L, not gamma/theta -- if this backtester
-        is ever extended to a time-varying hedge_vol, attribution_error
-        would silently absorb the real vega P&L and mislabel it as
-        higher-order residual unless this decomposition is extended to
-        include an explicit vega term.
+        Two further EXPLICIT terms (both exactly zero in the classic
+        constant-vol, rebalance-to-delta configuration, so the original
+        decomposition is recovered unchanged there):
+
+        - **vega_pnl** = vega_prev * (hedge_vol_t - hedge_vol_{t-1}): the
+          re-marking P&L when `run` was given a time-varying hedge_vol
+          series. On a real book this is often the DOMINANT daily option
+          P&L term; without it, a time-varying-vol attribution would
+          silently mislabel real vega P&L as higher-order residual.
+        - **delta_gap_pnl** = (shares_prev - delta_prev) * dS: the first-
+          order P&L of deliberately holding away from the model delta,
+          which is exactly what band policies (BandPolicy,
+          WhalleyWilmottPolicy) do inside their no-trade region. The
+          derivation above assumed shares_prev == delta_prev; this term is
+          the correction when a policy chooses otherwise.
         """
         df = result.reset_index(drop=True).copy()
         n = len(df)
@@ -193,7 +237,12 @@ class HedgingBacktester:
         financing = np.zeros(n)
         gamma_pnl = np.zeros(n)
         theta_pnl = np.zeros(n)
+        vega_pnl = np.zeros(n)
+        delta_gap_pnl = np.zeros(n)
         transaction_cost_pnl = np.zeros(n)
+
+        has_vega = "vega" in df and "hedge_vol" in df
+        has_shares = "shares" in df and "delta" in df
 
         for i in range(1, n):
             elapsed_days = (df["date"].iat[i] - df["date"].iat[i - 1]).days or 1
@@ -203,14 +252,22 @@ class HedgingBacktester:
             d_spot = df["spot"].iat[i] - df["spot"].iat[i - 1]
             gamma_pnl[i] = -0.5 * df["gamma"].iat[i - 1] * d_spot ** 2
             theta_pnl[i] = -df["theta"].iat[i - 1] * dt_years
+            if has_vega:
+                d_vol = df["hedge_vol"].iat[i] - df["hedge_vol"].iat[i - 1]
+                vega_pnl[i] = -df["vega"].iat[i - 1] * d_vol  # short the option: -vega exposure
+            if has_shares:
+                delta_gap_pnl[i] = (df["shares"].iat[i - 1] - df["delta"].iat[i - 1]) * d_spot
             transaction_cost_pnl[i] = -df["transaction_cost"].iat[i] if "transaction_cost" in df else 0.0
 
         df["realized_pnl"] = realized
         df["financing_pnl"] = financing
         df["gamma_pnl"] = gamma_pnl
         df["theta_pnl"] = theta_pnl
+        df["vega_pnl"] = vega_pnl
+        df["delta_gap_pnl"] = delta_gap_pnl
         df["transaction_cost_pnl"] = transaction_cost_pnl
         df["predicted_pnl"] = (df["financing_pnl"] + df["gamma_pnl"] + df["theta_pnl"] +
+                                df["vega_pnl"] + df["delta_gap_pnl"] +
                                 df["transaction_cost_pnl"])
         df["attribution_error"] = df["realized_pnl"] - df["predicted_pnl"]
         return df
