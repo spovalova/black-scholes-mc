@@ -160,12 +160,12 @@ def svi_gatheral_jacquier_check(
     """
     k = np.linspace(k_range[0], k_range[1], n_points)
 
-    # PRECONDITION (real bug caught in external review): the g(k) >= 0
-    # criterion is only meaningful where total variance w(k) > 0. A slice
-    # with negative total variance ANYWHERE is an outright arbitrage
-    # (negative implied variance) regardless of what g(k) evaluates to --
-    # and g(k) divides by w, so its value on such a slice is garbage.
-    # Check the closed-form global minimum of w first.
+    # The g(k) >= 0 criterion is only meaningful where total variance
+    # w(k) > 0: g(k) divides by w, so its value on a negative-variance
+    # slice is garbage. A slice with negative total variance ANYWHERE is
+    # already an outright arbitrage (negative implied variance) regardless
+    # of what g(k) evaluates to, so check the closed-form global minimum
+    # of w first.
     min_w = svi_min_total_variance(svi)
     w_grid = svi.total_variance(k)
     min_w_on_grid = float(np.min(w_grid))
