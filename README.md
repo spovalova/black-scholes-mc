@@ -143,7 +143,52 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   well-posed regime; see `black_scholes.hpp`.
 - Batch pricing/IV variants (`bs_price_with_greeks_batch`,
   `bs_implied_vol_batch`) that loop in C++ rather than crossing the
-  Python/C++ boundary once per contract.
+  Python/C++ boundary once per contract, plus **NumPy-native**
+  `bs_price_with_greeks_batch_arrays`/`bs_implied_vol_batch_arrays`
+  (`py::array_t` in and out, struct-of-arrays, zero per-contract Python
+  object construction on either side of the call -- the list-of-
+  `MarketInputs` variants still construct N real Python objects before
+  the batch call even starts). Measured, not assumed: 7.1x/16.6x/20.5x
+  faster than the list-based path at n=13/100/500 contracts -- the win
+  grows with chain size because it's dominated by avoiding N object
+  constructions, not by the C++ compute loop itself being faster (isolate
+  just the call, ignoring construction, and the gap shrinks to ~1.2x).
+  `StripPricer` and `calibrate_heston`'s IV-space residual callback (the
+  actual profiled hot path, ~300 calls per calibration) both use the
+  array-native version now.
+- Long C++ calls (`MonteCarloPricer`, `AmericanPricer`, `HestonMCPricer`,
+  `heston_price`/`heston_price_batch`, `crr_price`/`crr_implied_vol`, the
+  batch functions above) release the GIL for the duration of the call, so
+  other Python threads aren't blocked -- applied selectively, not as a
+  blanket default: releasing/reacquiring the GIL has its own small fixed
+  cost, so it's skipped on sub-microsecond calls (`bs_price` etc.) where
+  that cost would dominate rather than pay for itself.
+- **OpenMP** parallelizes the path loops in `MonteCarloPricer`,
+  `AmericanPricer` (LSM), and `HestonMCPricer` -- each path/output index
+  seeks to its OWN disjoint Philox counter position before drawing (see
+  `philox.hpp`), so results are reproducible regardless of thread count:
+  confirmed directly (`test_openmp_determinism.py`) that the underlying
+  draws are exactly reproducible at any thread count, while the
+  *aggregated* price/std_error can differ in the last few ULPs at scale
+  -- OpenMP's `reduction(+:...)` sums per-thread partial results in a
+  thread-count-dependent order, and floating-point addition isn't
+  associative. That's standard, expected behavior for any parallelized
+  numerical reduction (BLAS/LAPACK included), stated precisely here
+  rather than oversold as "bit-identical." Measured speedup (Apple M4
+  Pro, 8 performance cores): European MC 6.1x at 8 threads (46.0ms ->
+  7.6ms), Heston MC 7.4x (919.1ms -> 124.7ms), LSM only 2.0x (594.4ms ->
+  294.8ms) -- capped by Amdahl's law: only path *generation* is
+  parallelized, not LSM's backward-induction regression step, which is a
+  real fraction of its total cost. The build detects OpenMP via an actual
+  compile-and-link check (`setup.py`), not a platform assumption, and
+  degrades gracefully to a correct sequential build if it's unavailable
+  -- `#pragma omp` directives are silently ignored by a compiler that
+  doesn't have OpenMP enabled, so a failed/skipped detection costs
+  parallelism, not correctness. Verified working end-to-end on macOS
+  (Apple Clang + Homebrew `libomp`) in this environment; Linux (`-fopenmp`)
+  and Windows (`/openmp`) use standard, well-established flags but aren't
+  independently verified here -- CI (3 OSes) is the real cross-platform
+  test.
 - **Philox4x64-10** (Salmon et al. 2011) counter-based RNG (`philox.hpp`)
   underlies every Monte Carlo pricer below, replacing `std::mt19937_64`.
   Two things this actually buys, not just "a different generator": (1)
@@ -408,6 +453,14 @@ guess whether it's an oversight.
 - No Andersen-Broadie duality bounds on LSM. American Monte Carlo prices
   remain point estimates with an MC standard error, not a certified
   [lower, upper] interval.
+- No thread-safety for concurrent calls on the SAME `MonteCarloPricer`/
+  `AmericanPricer`/`HestonMCPricer` instance. Releasing the GIL for these
+  calls (see above) means two Python threads calling `.price()` on the
+  *same* instance at the same time would race on that instance's internal
+  path-generation counter -- a real, not hypothetical, consequence of
+  the GIL-release change. Safe pattern: one pricer instance per thread
+  (cheap to construct); this project doesn't add locking or any other
+  cross-call synchronization on top of that.
 
 **Data and execution**
 - No full historical options-tick database. `Backtester`'s multi-day loop
@@ -482,6 +535,16 @@ Run it yourself: `pip install -e ".[benchmark]"` then
 
 Requires a C++17 compiler (Xcode command line tools on macOS) and Python
 3.9+. No CMake needed -- the extension builds via `pybind11.setup_helpers`.
+
+OpenMP (parallelizes the Monte Carlo/LSM/Heston-MC path loops -- see
+"What's implemented") is optional and auto-detected: `setup.py` actually
+compiles and links a trivial OpenMP program before enabling it, so a
+missing toolchain silently builds sequential instead of failing. On Linux
+and Windows this typically just works (`-fopenmp`/`/openmp` are part of
+the standard toolchain); on macOS, Apple Clang doesn't bundle OpenMP --
+`brew install libomp` first if you want it enabled (fully optional; the
+build and every pricer are correct either way, just single-threaded
+without it).
 
 ```bash
 cd black-scholes-mc

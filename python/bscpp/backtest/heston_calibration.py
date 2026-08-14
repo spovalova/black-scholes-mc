@@ -79,16 +79,22 @@ def _heston_implied_vols(params, strikes, option_types, spot, t_years, rate, div
     prices = bscpp.heston_price_batch(spot, [float(k) for k in strikes], otypes, rate,
                                        dividend_yield, t_years, hp, num_nodes, phi_max)
 
-    seed_inputs = [
-        bscpp.make_inputs(spot, float(k), rate, 0.2, t_years, t, dividend_yield)
-        for k, t in zip(strikes, option_types)
-    ]
-    ivs = bscpp.bs_implied_vol_batch(seed_inputs, prices)
+    # NumPy-native IV solve (see bs_implied_vol_batch_arrays): this
+    # function is the residual callback least_squares invokes on every
+    # calibration iteration (~300 calls per calibrate_heston), so avoiding
+    # a fresh list[MarketInputs] construction every single call is exactly
+    # the hot-path case the array-native API exists for, not a one-off.
+    n = len(strikes)
+    otype_arr = (np.asarray(option_types) != "call").astype(np.int32)
+    ivs = bscpp.bs_implied_vol_batch_arrays(
+        np.full(n, spot), np.asarray(strikes, dtype=float), np.full(n, rate),
+        np.full(n, dividend_yield), np.full(n, 0.2), np.full(n, t_years), otype_arr,
+        np.asarray(prices, dtype=float))
     # a failed IV solve (NaN) means this parameter guess produced an
     # arbitrage-violating or otherwise unrecoverable price; push the
     # optimizer away from it with a large (but finite) residual instead of
     # propagating NaN into least_squares.
-    return np.array([iv if iv == iv else 5.0 for iv in ivs])
+    return np.where(np.isfinite(ivs), ivs, 5.0)
 
 
 def calibrate_heston(

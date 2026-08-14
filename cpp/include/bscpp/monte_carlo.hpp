@@ -26,7 +26,14 @@ private:
     static double payoff(double s_t, double strike, OptionType type);
     MCResult price_with_z(const MarketInputs& in, const std::vector<double>& z, bool antithetic);
 
-    Philox4x64 rng_;
+    // generate_normals draws are index-addressed (see the .cpp), not
+    // sequentially consumed from one shared, stateful generator -- that's
+    // what makes the loop safe to parallelize (#pragma omp parallel for)
+    // with output that's bit-identical regardless of thread count or
+    // scheduling: block_cursor_ hands out a disjoint counter range per
+    // call, and output index i within that range depends only on i.
+    std::uint64_t seed_;
+    std::uint64_t block_cursor_ = 0;
 };
 
 }  // namespace bscpp

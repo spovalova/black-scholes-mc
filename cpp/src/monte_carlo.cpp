@@ -7,12 +7,26 @@
 
 namespace bscpp {
 
-MonteCarloPricer::MonteCarloPricer(std::uint64_t seed) : rng_(seed) {}
+MonteCarloPricer::MonteCarloPricer(std::uint64_t seed) : seed_(seed) {}
 
 std::vector<double> MonteCarloPricer::generate_normals(long n) {
     std::vector<double> z(static_cast<size_t>(n));
+    // Each output index seeks to its OWN Philox counter position (base +
+    // i) rather than drawing from one shared, sequentially-advancing
+    // stream -- output i depends only on i, never on which thread
+    // computes it or in what order, which is exactly what makes this
+    // loop safe to run with #pragma omp parallel for: same output for 1
+    // thread or N. block_cursor_ advances by n so the NEXT
+    // generate_normals call (e.g. Greeks bump-and-reprice reusing common
+    // random numbers) starts from a disjoint range, never repeating.
+    const std::uint64_t base = block_cursor_;
+    block_cursor_ += static_cast<std::uint64_t>(n);
+
+#pragma omp parallel for
     for (long i = 0; i < n; ++i) {
-        z[static_cast<size_t>(i)] = standard_normal(rng_);
+        Philox4x64 local(seed_);
+        local.seek(base + static_cast<std::uint64_t>(i));
+        z[static_cast<size_t>(i)] = standard_normal(local);
     }
     return z;
 }
@@ -43,6 +57,7 @@ MCResult MonteCarloPricer::price_with_z(const MarketInputs& in, const std::vecto
     // (reported std_error vs. realized dispersion across independent seeds).
     double sum = 0.0;
     double sum_sq = 0.0;
+#pragma omp parallel for reduction(+ : sum, sum_sq)
     for (long i = 0; i < n_draws; ++i) {
         const double zi = z[static_cast<size_t>(i)];
         const double s_t = in.spot * std::exp(drift + diffusion * zi);

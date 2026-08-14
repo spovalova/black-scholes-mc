@@ -62,6 +62,65 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
 
 ### Added
 
+- **NumPy-native batch API, selective GIL release, OpenMP path loops** --
+  the "systems, not just C++" item.
+  - `bs_price_with_greeks_batch_arrays`/`bs_implied_vol_batch_arrays`:
+    `py::array_t` struct-of-arrays in and out, zero per-contract Python
+    object construction (the list-of-`MarketInputs` batch functions still
+    construct N real objects before the call starts -- the exact overhead
+    batching was meant to remove, just moved one step earlier). Measured
+    7.1x/16.6x/20.5x faster than the list-based path at n=13/100/500
+    contracts (the gap grows with n because it's dominated by avoiding N
+    object constructions, not the C++ loop itself: isolating just the
+    call, the gap is only ~1.2x). Wired into `StripPricer` and
+    `calibrate_heston`'s IV-space residual callback (the actual profiled
+    hot path, ~300 calls/calibration) -- calibration wall-clock is
+    unchanged, honestly reported: Heston pricing, not the BS IV step, is
+    96.8% of that cost per the original profiling, so a large relative
+    win in a small-fraction component doesn't move total calibration
+    time. `StripPricer.price_strip` end-to-end: 3.1ms for a 50-row chain
+    (no clean isolated before/after here -- other pipeline costs are
+    unaffected by this change and weren't independently re-measured).
+  - `py::call_guard<py::gil_scoped_release>()` on long C++ calls
+    (`MonteCarloPricer`, `AmericanPricer`, `HestonMCPricer`,
+    `heston_price`/`_batch`, `crr_price`/`crr_implied_vol`, the batch
+    functions) -- applied selectively: skipped on sub-microsecond calls
+    (`bs_price` etc.) where the release/reacquire's own fixed cost would
+    dominate rather than pay for itself.
+  - OpenMP parallelizes the path loops in all three MC pricers. Redesigned
+    `generate_normals`/`simulate_paths`/`HestonMCPricer::price` so each
+    output index/path seeks to its OWN disjoint Philox counter position
+    (base + i, see `philox.hpp`) instead of drawing from one shared,
+    sequentially-advancing generator -- output depends only on the index,
+    never on thread count or scheduling, which is what makes the loop
+    safe to parallelize at all. `AmericanPricer`'s two `Philox4x64`
+    members became a `seed_` + per-stream block cursor (constructs a
+    fresh local generator per path instead); cursors advance after each
+    call so a reused pricer instance draws fresh, non-repeating paths
+    (verified directly, not assumed). Precisely verified, not oversold:
+    the underlying draws are exactly reproducible at any thread count
+    (`test_openmp_determinism.py`), but the *aggregated* price/std_error
+    can differ in the last few ULPs at scale, because OpenMP's
+    `reduction(+:...)` sums per-thread partials in a thread-count-
+    dependent order and floating-point addition isn't associative --
+    standard, expected behavior for any parallelized numerical reduction,
+    stated exactly rather than claimed as blanket "bit-identical."
+    Measured speedup (Apple M4 Pro, 8 performance cores): European MC
+    6.1x at 8 threads (46.0ms -> 7.6ms), Heston MC 7.4x (919.1ms ->
+    124.7ms), LSM only 2.0x (594.4ms -> 294.8ms) -- Amdahl's law: only
+    path generation is parallelized, not LSM's backward-induction
+    regression step. `setup.py` detects OpenMP via an actual compile-
+    and-link check (not a platform assumption) and degrades gracefully
+    to a correct sequential build if unavailable -- `#pragma omp` is
+    silently ignored by a compiler without it enabled. Verified working
+    end-to-end on macOS (Apple Clang + Homebrew `libomp`, not bundled by
+    default) in this environment; Linux/Windows use standard flags but
+    aren't independently verified here -- CI (3 OSes) is the real
+    cross-platform test. New, real limitation disclosed in the README's
+    Scope section: releasing the GIL means concurrent calls on the SAME
+    pricer instance from multiple Python threads would race on that
+    instance's path-generation cursor -- one instance per thread is the
+    safe pattern, no locking added on top.
 - **`bscpp::Philox4x64`** (`philox.hpp`): counter-based RNG (Salmon,
   Moraes, Sanches, Pande 2011) replacing `std::mt19937_64` in every Monte
   Carlo pricer (`MonteCarloPricer`, `AmericanPricer`, `HestonMCPricer`).

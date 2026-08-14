@@ -234,7 +234,7 @@ bool HestonPricer::satisfies_feller_condition(const HestonParams& hp) {
     return 2.0 * hp.kappa * hp.theta >= hp.xi * hp.xi;
 }
 
-HestonMCPricer::HestonMCPricer(std::uint64_t seed) : rng_(seed) {}
+HestonMCPricer::HestonMCPricer(std::uint64_t seed) : seed_(seed) {}
 
 MCResult HestonMCPricer::price(double spot, double strike, double rate, double dividend_yield,
                                 double maturity, OptionType type, const HestonParams& hp,
@@ -244,14 +244,24 @@ MCResult HestonMCPricer::price(double spot, double strike, double rate, double d
     const double sqrt_one_minus_rho2 = std::sqrt(std::max(1.0 - hp.rho * hp.rho, 0.0));
     const double discount = std::exp(-rate * maturity);
 
+    // 2 normals/step (z_v, z_indep) => 1 Philox block/step (2 normals per
+    // block) => num_steps blocks per path; see monte_carlo.cpp/
+    // longstaff_schwartz.cpp for the same disjoint-counter-range pattern.
+    const std::uint64_t per_path = static_cast<std::uint64_t>(num_steps);
+    const std::uint64_t base = cursor_;
+    cursor_ += static_cast<std::uint64_t>(num_paths) * per_path;
+
     double sum = 0.0;
     double sum_sq = 0.0;
+#pragma omp parallel for reduction(+ : sum, sum_sq)
     for (long p = 0; p < num_paths; ++p) {
+        Philox4x64 local(seed_);
+        local.seek(base + static_cast<std::uint64_t>(p) * per_path);
         double s = spot;
         double v = hp.v0;
         for (int step = 0; step < num_steps; ++step) {
-            const double z_v = standard_normal(rng_);
-            const double z_indep = standard_normal(rng_);
+            const double z_v = standard_normal(local);
+            const double z_indep = standard_normal(local);
             const double z_s = hp.rho * z_v + sqrt_one_minus_rho2 * z_indep;
 
             const double v_pos = std::max(v, 0.0);  // full truncation

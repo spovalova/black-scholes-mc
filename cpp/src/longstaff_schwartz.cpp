@@ -11,6 +11,16 @@ namespace bscpp {
 
 namespace {
 
+// Number of Philox4x64 blocks one path's num_steps normal draws consume:
+// standard_normal makes 2 raw draws per call, and one Philox block yields
+// 4 raw draws (2 normals), so a path needs ceil(num_steps/2) blocks.
+// Used to give each path a disjoint counter range -- path p starts at
+// base + p*blocks_per_path, so no two paths' blocks can ever overlap
+// regardless of num_paths.
+std::uint64_t blocks_per_path(int num_steps) {
+    return (static_cast<std::uint64_t>(num_steps) + 1) / 2;
+}
+
 // Solves A*x = b via Gaussian elimination with partial pivoting.
 // Returns false (leaving x untouched) if A is numerically singular --
 // callers must treat that as "not enough information, skip this update"
@@ -62,15 +72,26 @@ std::vector<double> basis_at(double x, int k) {
     return basis;
 }
 
-std::vector<std::vector<double>> simulate_paths(Philox4x64& rng, const MarketInputs& in,
+std::vector<std::vector<double>> simulate_paths(std::uint64_t seed, std::uint64_t stream,
+                                                 std::uint64_t base_counter, const MarketInputs& in,
                                                  long num_paths, int num_steps, double drift,
                                                  double diffusion) {
+    const std::uint64_t per_path = blocks_per_path(num_steps);
     std::vector<std::vector<double>> paths(
         static_cast<size_t>(num_paths), std::vector<double>(static_cast<size_t>(num_steps) + 1));
+
+    // Each path constructs its OWN local Philox4x64 and seeks to a
+    // disjoint counter range (base_counter + p*per_path) before drawing
+    // -- no shared generator for parallel path threads to race on, and
+    // output is bit-identical regardless of thread count or scheduling
+    // (path p's draws depend only on p, never on execution order).
+#pragma omp parallel for
     for (long p = 0; p < num_paths; ++p) {
+        Philox4x64 local(seed, stream);
+        local.seek(base_counter + static_cast<std::uint64_t>(p) * per_path);
         paths[p][0] = in.spot;
         for (int t = 1; t <= num_steps; ++t) {
-            const double z = standard_normal(rng);
+            const double z = standard_normal(local);
             paths[p][t] = paths[p][t - 1] * std::exp(drift + diffusion * z);
         }
     }
@@ -154,13 +175,7 @@ std::vector<std::optional<std::vector<double>>> calibrate(
 
 }  // namespace
 
-AmericanPricer::AmericanPricer(std::uint64_t seed)
-    // Philox's stream parameter gives a principled, provably-non-
-    // overlapping second stream from the same seed (see philox.hpp) --
-    // replaces the previous arbitrary-magic-number seed offset
-    // (seed + 1768237423ULL), which only relied on that offset being
-    // "big enough" to avoid overlap in mt19937_64's sequential state.
-    : rng_(seed, 0), rng_calibration_(seed, 1) {}
+AmericanPricer::AmericanPricer(std::uint64_t seed) : seed_(seed) {}
 
 double AmericanPricer::payoff(double s, double strike, OptionType type) {
     if (type == OptionType::Call) {
@@ -181,14 +196,19 @@ MCResult AmericanPricer::price(const MarketInputs& in, long num_paths, int num_s
     const double discount_dt = std::exp(-in.rate * dt);
 
     // Phase 1: fit the exercise policy on an independently-seeded
-    // calibration path set.
-    const auto calibration_paths =
-        simulate_paths(rng_calibration_, in, num_calibration_paths, num_steps, drift, diffusion);
+    // calibration path set (stream 1 -- provably disjoint from the
+    // pricing path set's stream 0, see philox.hpp).
+    const auto calibration_paths = simulate_paths(seed_, 1, calibration_cursor_, in,
+                                                   num_calibration_paths, num_steps, drift, diffusion);
+    calibration_cursor_ +=
+        static_cast<std::uint64_t>(num_calibration_paths) * blocks_per_path(num_steps);
     const auto betas = calibrate(calibration_paths, in, num_steps, k, discount_dt);
 
     // Phase 2: apply that FIXED policy forward along a separate pricing
     // path set -- no regression happens here, only exercise decisions.
-    const auto pricing_paths = simulate_paths(rng_, in, num_paths, num_steps, drift, diffusion);
+    const auto pricing_paths =
+        simulate_paths(seed_, 0, pricing_cursor_, in, num_paths, num_steps, drift, diffusion);
+    pricing_cursor_ += static_cast<std::uint64_t>(num_paths) * blocks_per_path(num_steps);
 
     double sum = 0.0;
     double sum_sq = 0.0;

@@ -114,7 +114,14 @@ public:
                    int num_steps);
 
 private:
-    Philox4x64 rng_;
+    // See MonteCarloPricer/AmericanPricer: path generation constructs a
+    // fresh LOCAL Philox4x64 per path (seeked to a disjoint counter
+    // range), parallelized via #pragma omp parallel for -- no shared
+    // generator for parallel path threads to race on. cursor_ advances
+    // after each price() call so a reused instance draws fresh paths
+    // rather than repeating them.
+    std::uint64_t seed_;
+    std::uint64_t cursor_ = 0;
 };
 
 }  // namespace bscpp

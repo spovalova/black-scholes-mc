@@ -1,7 +1,9 @@
+#include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 #include "bscpp/black_scholes.hpp"
@@ -78,25 +80,141 @@ PYBIND11_MODULE(_core, m) {
     m.def("bs_greeks", &BlackScholes::greeks, py::arg("inputs"));
     m.def("bs_price_with_greeks", &BlackScholes::price_with_greeks, py::arg("inputs"));
     m.def("bs_price_with_greeks_batch", &BlackScholes::price_with_greeks_batch, py::arg("inputs"),
+          py::call_guard<py::gil_scoped_release>(),
           "Price + Greeks for a list of MarketInputs in one C++ call (avoids per-contract "
           "Python<->C++ crossing overhead when pricing a whole chain).");
     m.def("bs_implied_vol", &BlackScholes::implied_vol, py::arg("inputs"), py::arg("market_price"),
           py::arg("initial_guess") = 0.2, py::arg("max_iter") = 100, py::arg("tol") = 1e-8);
     m.def("bs_implied_vol_batch", &BlackScholes::implied_vol_batch, py::arg("inputs"),
           py::arg("market_prices"), py::arg("initial_guess") = 0.2, py::arg("max_iter") = 100,
-          py::arg("tol") = 1e-8);
+          py::arg("tol") = 1e-8, py::call_guard<py::gil_scoped_release>());
 
+    // --- NumPy-native batch variants ---
+    // bs_price_with_greeks_batch/bs_implied_vol_batch above take a Python
+    // list of MarketInputs OBJECTS: pybind11/stl.h converts that list by
+    // constructing N individual Python MarketInputs instances (each a
+    // real object allocation + refcounting) before the batch call even
+    // starts -- the exact per-contract Python<->C++ crossing overhead
+    // batching was supposed to eliminate, just moved one step earlier.
+    // These variants take struct-of-arrays NumPy arrays directly (the
+    // layout chain data is already in, via chain["strike"].to_numpy()
+    // etc.) and return struct-of-arrays too, with zero Python object
+    // construction per contract on either side -- `unchecked` accessors
+    // are raw-buffer access, safe to use with the GIL released (no
+    // Python API calls happen inside the loop), so the whole computation
+    // runs GIL-free.
+    m.def("bs_price_with_greeks_batch_arrays",
+          [](py::array_t<double> spot, py::array_t<double> strike, py::array_t<double> rate,
+             py::array_t<double> dividend_yield, py::array_t<double> vol,
+             py::array_t<double> maturity, py::array_t<int> type) {
+              const ssize_t n = spot.size();
+              if (strike.size() != n || rate.size() != n || dividend_yield.size() != n ||
+                  vol.size() != n || maturity.size() != n || type.size() != n) {
+                  throw std::invalid_argument("all input arrays must be the same length");
+              }
+              auto s = spot.unchecked<1>();
+              auto k = strike.unchecked<1>();
+              auto r = rate.unchecked<1>();
+              auto q = dividend_yield.unchecked<1>();
+              auto v = vol.unchecked<1>();
+              auto t = maturity.unchecked<1>();
+              auto ty = type.unchecked<1>();
+
+              py::array_t<double> price(n), delta(n), gamma(n), vega(n), theta(n), rho(n);
+              auto price_m = price.mutable_unchecked<1>();
+              auto delta_m = delta.mutable_unchecked<1>();
+              auto gamma_m = gamma.mutable_unchecked<1>();
+              auto vega_m = vega.mutable_unchecked<1>();
+              auto theta_m = theta.mutable_unchecked<1>();
+              auto rho_m = rho.mutable_unchecked<1>();
+
+              {
+                  py::gil_scoped_release release;
+                  for (ssize_t i = 0; i < n; ++i) {
+                      MarketInputs in{s(i), k(i),
+                                       r(i), q(i),
+                                       v(i), t(i),
+                                       ty(i) == 0 ? OptionType::Call : OptionType::Put};
+                      const PricingResult result = BlackScholes::price_with_greeks(in);
+                      price_m(i) = result.price;
+                      delta_m(i) = result.greeks.delta;
+                      gamma_m(i) = result.greeks.gamma;
+                      vega_m(i) = result.greeks.vega;
+                      theta_m(i) = result.greeks.theta;
+                      rho_m(i) = result.greeks.rho;
+                  }
+              }
+              return py::make_tuple(price, delta, gamma, vega, theta, rho);
+          },
+          py::arg("spot"), py::arg("strike"), py::arg("rate"), py::arg("dividend_yield"),
+          py::arg("vol"), py::arg("maturity"), py::arg("type"),
+          "Struct-of-arrays batch price+Greeks: NumPy arrays in, NumPy arrays out "
+          "((price, delta, gamma, vega, theta, rho)), type as 0=Call/1=Put. GIL released "
+          "for the whole loop. See bs_price_with_greeks_batch's docstring for why this "
+          "exists alongside the list-of-MarketInputs version.");
+
+    m.def("bs_implied_vol_batch_arrays",
+          [](py::array_t<double> spot, py::array_t<double> strike, py::array_t<double> rate,
+             py::array_t<double> dividend_yield, py::array_t<double> vol,
+             py::array_t<double> maturity, py::array_t<int> type,
+             py::array_t<double> market_price, double initial_guess, int max_iter, double tol) {
+              const ssize_t n = spot.size();
+              if (strike.size() != n || rate.size() != n || dividend_yield.size() != n ||
+                  vol.size() != n || maturity.size() != n || type.size() != n ||
+                  market_price.size() != n) {
+                  throw std::invalid_argument("all input arrays must be the same length");
+              }
+              auto s = spot.unchecked<1>();
+              auto k = strike.unchecked<1>();
+              auto r = rate.unchecked<1>();
+              auto q = dividend_yield.unchecked<1>();
+              auto v = vol.unchecked<1>();
+              auto t = maturity.unchecked<1>();
+              auto ty = type.unchecked<1>();
+              auto mp = market_price.unchecked<1>();
+
+              py::array_t<double> iv(n);
+              auto iv_m = iv.mutable_unchecked<1>();
+
+              {
+                  py::gil_scoped_release release;
+                  for (ssize_t i = 0; i < n; ++i) {
+                      MarketInputs in{s(i), k(i),
+                                       r(i), q(i),
+                                       v(i), t(i),
+                                       ty(i) == 0 ? OptionType::Call : OptionType::Put};
+                      iv_m(i) = BlackScholes::implied_vol(in, mp(i), initial_guess, max_iter, tol);
+                  }
+              }
+              return iv;
+          },
+          py::arg("spot"), py::arg("strike"), py::arg("rate"), py::arg("dividend_yield"),
+          py::arg("vol"), py::arg("maturity"), py::arg("type"), py::arg("market_price"),
+          py::arg("initial_guess") = 0.2, py::arg("max_iter") = 100, py::arg("tol") = 1e-8,
+          "Struct-of-arrays batch implied-vol solve: NumPy arrays in, NumPy array out. "
+          "GIL released for the whole loop.");
+
+    // gil_scoped_release below is applied selectively, not blanket: only
+    // to calls slow enough (single-digit microseconds or more) that
+    // releasing/reacquiring the GIL is a rounding error against the
+    // compute it unblocks, not a call slow ENOUGH to bother -- releasing
+    // it around e.g. bs_price (sub-microsecond, see benchmarks/) would
+    // make that call slower, not faster, since the release/reacquire
+    // pair has its own real (if small) fixed cost.
     py::class_<MonteCarloPricer>(m, "MonteCarloPricer")
         .def(py::init<std::uint64_t>(), py::arg("seed") = 42)
         .def("price_european", &MonteCarloPricer::price_european, py::arg("inputs"),
-             py::arg("num_paths"), py::arg("antithetic") = true)
+             py::arg("num_paths"), py::arg("antithetic") = true,
+             py::call_guard<py::gil_scoped_release>())
         .def("greeks_european", &MonteCarloPricer::greeks_european, py::arg("inputs"),
-             py::arg("num_paths"), py::arg("antithetic") = true, py::arg("bump_frac") = 0.01);
+             py::arg("num_paths"), py::arg("antithetic") = true, py::arg("bump_frac") = 0.01,
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<AmericanPricer>(m, "AmericanPricer")
         .def(py::init<std::uint64_t>(), py::arg("seed") = 42)
         .def("price", &AmericanPricer::price, py::arg("inputs"), py::arg("num_paths"),
              py::arg("num_steps"), py::arg("poly_degree") = 2, py::arg("num_calibration_paths") = 0,
+             py::call_guard<py::gil_scoped_release>(),
              "American-style option price via Longstaff-Schwartz least-squares Monte Carlo, "
              "using an independently-seeded calibration path set (num_calibration_paths, "
              "defaults to num_paths) separate from the pricing path set.");
@@ -119,10 +237,11 @@ PYBIND11_MODULE(_core, m) {
 
     m.def("heston_price", &HestonPricer::price, py::arg("spot"), py::arg("strike"),
           py::arg("rate"), py::arg("dividend_yield"), py::arg("maturity"), py::arg("type"),
-          py::arg("params"));
+          py::arg("params"), py::call_guard<py::gil_scoped_release>());
     m.def("heston_price_batch", &HestonPricer::price_batch, py::arg("spot"), py::arg("strikes"),
           py::arg("types"), py::arg("rate"), py::arg("dividend_yield"), py::arg("maturity"),
           py::arg("params"), py::arg("num_nodes") = 1500, py::arg("phi_max") = 150.0,
+          py::call_guard<py::gil_scoped_release>(),
           "Prices a whole strike grid in one call, sharing characteristic-function "
           "evaluations across strikes -- see heston.hpp for why this is faster, not just "
           "more convenient, than calling heston_price in a loop, and for when it isn't.");
@@ -133,7 +252,7 @@ PYBIND11_MODULE(_core, m) {
         .def(py::init<std::uint64_t>(), py::arg("seed") = 42)
         .def("price", &HestonMCPricer::price, py::arg("spot"), py::arg("strike"), py::arg("rate"),
              py::arg("dividend_yield"), py::arg("maturity"), py::arg("type"), py::arg("params"),
-             py::arg("num_paths"), py::arg("num_steps"));
+             py::arg("num_paths"), py::arg("num_steps"), py::call_guard<py::gil_scoped_release>());
 
     // Testing-only: exposes raw Philox4x64 draws so test_philox.py can
     // cross-validate them bit-for-bit against numpy.random.Philox on the
@@ -161,14 +280,14 @@ PYBIND11_MODULE(_core, m) {
 
     m.def("crr_price", &CRRPricer::price, py::arg("spot"), py::arg("strike"), py::arg("rate"),
           py::arg("dividend_yield"), py::arg("maturity"), py::arg("type"), py::arg("vol"),
-          py::arg("num_steps") = 200,
+          py::arg("num_steps") = 200, py::call_guard<py::gil_scoped_release>(),
           "American-style price via a dividend-aware Cox-Ross-Rubinstein binomial "
           "tree -- see crr_tree.hpp for why this, not Longstaff-Schwartz MC, is the "
           "chain pipeline's American pricer.");
     m.def("crr_implied_vol", &CRRPricer::implied_vol, py::arg("spot"), py::arg("strike"),
           py::arg("rate"), py::arg("dividend_yield"), py::arg("maturity"), py::arg("type"),
           py::arg("market_price"), py::arg("num_steps") = 200, py::arg("tol") = 1e-6,
-          py::arg("max_iter") = 100,
+          py::arg("max_iter") = 100, py::call_guard<py::gil_scoped_release>(),
           "American implied vol via Brent's method against crr_price -- NaN if "
           "market_price isn't bracketed by [1e-6, 5.0] vol, matching bs_implied_vol's "
           "contract exactly.");

@@ -19,10 +19,16 @@ namespace bscpp {
 // coefficients per exercise date, backward pass) and a separate pricing
 // set (applies those fixed coefficients forward, deciding exercise as it
 // goes). Regressing and pricing on the *same* path set is a known source
-// of small upward look-ahead bias; QuantLib avoids it with a
-// separately-seeded calibration set (seed + 1768237423, literally copied
-// from QuantLib's own offset choice, of no significance beyond "a large
-// arbitrary constant") and this class does the same.
+// of small upward look-ahead bias; QuantLib avoids it with a separately-
+// seeded calibration set, and this class does the same via Philox's
+// stream parameter (see philox.hpp) -- a provably non-overlapping second
+// stream from the same seed, not an arbitrary offset hoped to be "large
+// enough."
+//
+// Path generation is parallelized (#pragma omp parallel for) across
+// paths: each path seeks to its own disjoint Philox counter range before
+// drawing, so output is bit-identical regardless of thread count -- see
+// simulate_paths in the .cpp.
 class AmericanPricer {
 public:
     explicit AmericanPricer(std::uint64_t seed = 42);
@@ -45,8 +51,15 @@ public:
     static double payoff(double s, double strike, OptionType type);
 
 private:
-    Philox4x64 rng_;              // pricing path set
-    Philox4x64 rng_calibration_;  // independently-seeded calibration path set
+    // seed_ + a per-stream block cursor (advanced after each price()
+    // call, in case an instance is ever reused for a second call) stand
+    // in for what used to be two live Philox4x64 members -- path
+    // generation now constructs a fresh LOCAL Philox4x64 per path (see
+    // simulate_paths in the .cpp), so there's no shared generator object
+    // for parallel path threads to race on.
+    std::uint64_t seed_;
+    std::uint64_t pricing_cursor_ = 0;      // stream 0
+    std::uint64_t calibration_cursor_ = 0;  // stream 1
 };
 
 }  // namespace bscpp
