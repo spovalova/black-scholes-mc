@@ -19,54 +19,75 @@ Most of this project replicates known results correctly (Black-Scholes,
 Heston, SVI, LSM) -- useful for learning, not itself a contribution. One
 piece goes further: **is Whalley & Wilmott's (1997) asymptotically-optimal
 hedging band actually cost-risk-minimizing on real market data, or only
-under the continuous-monitoring assumption it's derived under?**
+under the continuous-monitoring assumption it's derived under -- and if
+it's wider than theory, is that daily (vs. continuous) rebalancing, not
+knowing the true volatility, or real markets not being GBM?**
 
-`examples/hedging_policy_frontier_study.py` sweeps the WW band width
-(via the exact identity `band(risk_aversion = lam0/c^3) = c * band(lam0)`,
-regression-tested in `test_policies.py`) across real daily closes for 5
-liquid names, 50 rolling out-of-sample windows, and 3 risk-aversion
-regimes, scoring each width by the same mean-variance objective (cost +
-lam*variance) the theory itself optimizes.
+![Cost-risk objective vs. Whalley-Wilmott band multiplier, three arms, 95% bootstrap CI bands](assets/frontier.png)
 
-Two of the three regimes turned out to be cost-dominated -- the objective
-kept improving all the way to the edge of the tested grid, which is a
-methodological trap, not a finding (a wider grid would just move the
-"optimum" again; extending it 4x confirmed exactly that). Only the regime
-where cost and variance are genuinely balanced produces a well-posed
-interior optimum, and that's the one worth trusting: **the empirically
-cost-risk-minimizing band is ~2x wider than the asymptotic theory predicts
--- a modest (+7%) but statistically real gap** (stationary block-bootstrap
-CI on the objective difference excludes zero: `[0.008, 0.051]`,
-n=50, n_effective≈22). Plausible mechanism, not yet independently
-confirmed: WW's derivation assumes continuous monitoring, and this
-backtest -- like most practical implementations -- only rebalances once a
-day, which can't realize the fine-grained control the continuous-time
-band assumes.
+`examples/hedging_policy_frontier_study.py` sweeps the WW band width (via
+the exact identity `band(risk_aversion = lam0/c^3) = c * band(lam0)`,
+regression-tested in `test_policies.py`) across real daily closes for 20
+liquid tickers over 3 years (420 rolling out-of-sample windows) and 3
+risk-aversion regimes. Each width is scored by a **scale-invariant**
+mean-variance objective, `J(c) = mean(cost/premium0) + lam*mean(variance/
+premium0^2)` -- cost and variance normalized by each window's own option
+premium *before* pooling, not after (see `bscpp.backtest.frontier`).
+This matters: dollar cost scales with spot*turnover and dollar variance
+with spot^2*sigma^2*T, so a raw-dollar objective makes a fixed lambda mean
+something different for a ~$580 SPY window than a $100 simulated path --
+exactly the confound a cross-configuration comparison (real vs. simulated)
+can't afford.
+
+One of the three regimes is cost-dominated -- the objective keeps
+improving to the edge of the tested grid, a methodological trap, not a
+finding. The other two are well-posed (interior optimum, genuinely
+trading cost against variance), and **both show a real, statistically
+significant gap**: the empirically cost-risk-minimizing band is **8x wider
+than theory (+35.7%, bootstrap CI [0.0054, 0.0078], n=420,
+n_effective≈178)** at the moderate risk-aversion regime, and **4x wider
+(+20.7%, CI [0.0049, 0.0071], n_effective≈189)** at the high one. Checked
+per-ticker, not just pooled: 16/16 and 19/19 tickers with their own
+well-posed optimum individually show c\*>1 -- broad-based, not one name
+driving it.
 
 Run it yourself: `python examples/hedging_policy_frontier_study.py`
 (needs `POLYGON_API_KEY`, base equities tier only).
 
-**Follow-up control experiment** (`examples/gbm_control_experiment.py`, no
-API key needed): the "continuous vs. daily monitoring" mechanism above was
-plausible but untested -- it could equally have been fat tails or
-volatility clustering, real-market features GBM doesn't have. Rerunning
-the identical sweep (same objective, same bootstrap methodology) on
-simulated GBM paths at the same daily-rebalancing cadence, with hedge_vol
-set to the *true* simulation vol (removing vol-estimation noise as a
-further confound), isolates discretization specifically. Result: pure GBM
-with only daily monitoring **does** produce a real, statistically
-significant band-widening (`c*=4x` theory, `+20%` objective gap, bootstrap
-CI excludes zero) -- confirming discretization is a genuine, non-negligible
-mechanism, not a negligible technicality. But it **overshoots** the
-real-data result (`4x`/`+20%` vs. the real study's `2x`/`+7%`): pure
-discretization alone predicts *more* widening than real data actually
-shows, which rules out "discretization explains none of it" but also means
-real-market structure isn't simply adding extra widening on top of a GBM
-baseline -- something about real dynamics pulls the empirical optimum back
-*toward* theory relative to what discretization alone predicts. Open
-question, stated as such: genuine dynamical effect, or a scale mismatch
-between the control's vol/cost grid and the real study's actual realized
-vols.
+**Control experiments** (`examples/gbm_control_experiment.py`, no API key
+needed) isolate *why*, running the identical sweep/objective on simulated
+GBM paths at the same daily-rebalancing cadence, in two arms: `hedge_vol`
+= the *true* simulation vol (isolates discretization alone), and
+`hedge_vol` = a trailing-window realized-vol estimate computed exactly as
+the real study computes it (isolates discretization + vol-estimation
+error together). Result: **`gbm_true_vol` alone reproduces the real-data
+optimum almost exactly** -- `c*=8x` (+36.5%) at the moderate regime and
+`c*=4x` (+20.3%) at the high one, matching the real study's `8x`/`4x` on
+this grid. Adding vol-estimation error (`gbm_estimated_vol`) does **not**
+move the result closer to real data -- if anything it moves *away*
+(`c*=4x` at the moderate regime, undershooting real data's `8x`) or stays
+flat (`c*=4x` at the high regime, unchanged). That rules out vol-
+estimation error as the primary mechanism and points squarely at
+discretization: WW's continuous-monitoring assumption, violated by
+ordinary once-daily rebalancing under otherwise-exact GBM dynamics, is
+**sufficient on its own** to reproduce the real-data band-widening at
+this resolution -- real-market structure (fat tails, volatility
+clustering, autocorrelation) is not needed as an additional explanation.
+
+Run it yourself: `python examples/gbm_control_experiment.py` (no API key
+needed) followed by `python examples/plot_hedging_frontier.py` to
+regenerate the figure above.
+
+**This corrects an earlier draft of this finding** run before the
+scale-invariant objective existed, on 5 tickers/50 windows instead of 20/
+420, with a `RISK_AVERSIONS` grid not shared across arms. That version
+reported a real-data gap of only `+7%` (`c*~2x`) against a GBM-true-vol
+gap of `+20%` (`c*=4x`) -- GBM *overshooting* real data, the opposite
+conclusion from the one above. The earlier numbers weren't wrong given
+what they measured, but what they measured wasn't comparable across arms:
+a raw-dollar objective on a small, noisy real sample against a differently
+-scaled GBM config. Corrected here rather than quietly replaced -- see
+CHANGELOG.
 
 ## Layout
 

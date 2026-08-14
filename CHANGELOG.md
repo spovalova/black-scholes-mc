@@ -11,31 +11,54 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
 
 ### Research
 
+- **`bscpp.backtest.frontier`** (new, shared by both scripts below):
+  extracted the band-multiplier x risk-aversion grid runner and scoring
+  pipeline that both frontier scripts had been duplicating, and fixed a
+  real methodological gap in the process -- the mean-variance objective
+  (`cost + lambda*variance`) was scored in raw dollars, so a fixed
+  `lambda` meant something different for a ~$580 SPY window than a $100
+  GBM path (dollar cost scales with spot*turnover, dollar variance with
+  spot^2*sigma^2*T). Normalized both terms by each window's own option
+  premium *before* pooling across windows, making `c*` genuinely
+  comparable across tickers of different price levels and across real
+  vs. simulated arms. This changes the numbers below materially from an
+  earlier (uncorrected) draft of this finding -- see the last bullet.
 - **`examples/hedging_policy_frontier_study.py`**: tests whether
   Whalley-Wilmott's (1997) asymptotically-optimal hedging band is actually
-  cost-risk-minimizing on real market data (5 tickers, 50 rolling
-  out-of-sample windows), by sweeping the band width via the exact
-  `band(risk_aversion=lam0/c^3) = c*band(lam0)` identity (regression-tested
-  in `test_policies.py`) and scoring against the same mean-variance
-  objective the theory optimizes. Finding: 2 of 3 tested risk-aversion
-  regimes were cost-dominated (objective still improving at the grid edge
-  even after a 4x wider search -- a methodological artifact, reported as
-  such rather than as a result). The one well-posed regime shows a real,
-  small (+7%) gap: the empirically-optimal band is ~2x wider than theory,
-  statistically distinguishable from zero via stationary block bootstrap.
-  See the README's "Research finding" section.
-- **`examples/gbm_control_experiment.py`**: control experiment isolating
-  the leading candidate mechanism (daily vs. WW's assumed continuous
-  monitoring) from real-market structure (fat tails, vol clustering) as
-  the cause of the above gap. Reruns the identical sweep/objective/
-  bootstrap methodology on simulated GBM paths (5 vol levels x 10 paths,
-  same 45-business-day cadence, hedge_vol = true simulation vol to
-  remove estimation noise as a confound). Finding: discretization alone
-  *does* produce a real, statistically significant widening (c*=4x
-  theory, +20% gap, bootstrap CI excludes zero) -- confirming it's a
-  genuine mechanism -- but overshoots the real-data magnitude (4x/+20%
-  vs. 2x/+7%), meaning real-market structure isn't simply additive on
-  top of a GBM baseline. Reported as an open question, not resolved.
+  cost-risk-minimizing on real market data. Widened from 5 tickers/50
+  windows to 20 tickers/420 windows (3 years each), and added a per-ticker
+  breakdown so the finding isn't just a pooled number. 2 of 3
+  risk-aversion regimes are well-posed (interior optimum): `c*=8x` theory
+  (+35.7%, bootstrap CI excludes 0, n=420) and `c*=4x` theory (+20.7%),
+  both broad-based (16/16 and 19/19 tickers individually show `c*>1` in
+  their own well-posed regime). See the README's "Research finding".
+- **`examples/gbm_control_experiment.py`**: now runs TWO control arms
+  isolating discretization from vol-estimation error, not one. `hedge_vol`
+  = true simulation vol isolates "WW assumes continuous monitoring, this
+  only rebalances daily" alone; `hedge_vol` = a trailing-window estimate
+  (computed identically to the real study) adds vol-estimation error on
+  top, on the same underlying paths. Finding: `gbm_true_vol` alone
+  reproduces the real-data optimum almost exactly (`c*=8x`/`4x`, matching
+  the real study's `8x`/`4x` on this grid); adding estimation error does
+  NOT move the result closer to real data. Discretization, not vol-
+  clustering/fat tails and not vol-estimation error, is sufficient to
+  explain the real-data finding at this resolution.
+- **`examples/plot_hedging_frontier.py`** (new): renders `assets/
+  frontier.png` -- J(c) vs. c, one panel per risk-aversion regime, one
+  line + shaded 95% bootstrap CI per arm, theory (c=1) and each arm's
+  empirical optimum marked. Reads the grid CSVs the two scripts above
+  save to `examples/output/`, so it's fast to iterate on without
+  re-fetching market data or re-running thousands of simulated hedges.
+- **Correction**: an earlier draft of this finding (5 tickers/50 windows,
+  a single GBM arm, a raw-dollar objective) reported the *opposite*
+  qualitative conclusion -- real data `+7%`/`c*~2x` vs. GBM-true-vol
+  `+20%`/`c*=4x`, i.e. GBM overshooting real data, suggesting real-market
+  structure pulls the optimum back toward theory. That comparison wasn't
+  apples-to-apples: the raw-dollar objective conflated the real study's
+  ~$580 SPY-scale windows with the GBM control's $100-scale paths, and
+  the small real sample made the pooled estimate noisier. Corrected here
+  rather than silently replaced; the corrected, larger-sample,
+  scale-invariant result is the one to trust.
 
 ### Added
 

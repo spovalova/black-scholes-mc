@@ -1,5 +1,11 @@
 from bscpp.backtest.data_provider import DataProvider, MockProvider, PolygonProvider
 from bscpp.backtest.engine import Backtester, StripPricer
+from bscpp.backtest.frontier import (
+    FrontierRegime,
+    print_frontier_report,
+    run_policy_grid,
+    score_frontier,
+)
 from bscpp.backtest.heston_calibration import (
     calibrate_heston,
     calibrate_heston_with_stability,
@@ -46,4 +52,8 @@ __all__ = [
     "calibrate_heston",
     "calibrate_heston_with_stability",
     "heston_fit_rmse",
+    "FrontierRegime",
+    "run_policy_grid",
+    "score_frontier",
+    "print_frontier_report",
 ]
