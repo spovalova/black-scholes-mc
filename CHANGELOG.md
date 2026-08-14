@@ -62,6 +62,15 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
 
 ### Added
 
+- **README "Scope" section**: elevated the single "Out of scope" bullet
+  (previously buried at the end of "What's implemented") into its own
+  top-level section, and expanded it to cover everything surfaced by this
+  round of work -- no curve-bootstrapping engine, no separate repo/
+  financing curve, no full trading-day calendar, no exact American
+  Greeks, no Andersen-Broadie duality bounds on LSM -- alongside the
+  original data/execution/margin scope statement. Explicit scoping turns
+  an omission into a stated boundary instead of leaving a reviewer to
+  guess whether it's an oversight.
 - **`bscpp.clock.Clock`**: one explicit day-count convention (`ACT/365`
   default, `TRADING/252` available) instead of `365`/`252` as an
   unexamined magic number scattered per call site. `year_fraction`,

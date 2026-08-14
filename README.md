@@ -355,13 +355,59 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
 - Converts calculus Greeks (vega/rho per 1.00 of vol/rate, theta per year)
   to desk convention (vega/rho per 1%, theta per day).
 
-**Out of scope**: local vol (Dupire), SSVI/other cross-expiry-consistent
-surface models, stochastic vol beyond Heston (SABR, rough vol), a full
-historical options-tick database, multi-leg strategy backtesting over
-time, a real-time market data feed, order/execution management, margin
-and capital modeling, and a kill switch. The last four are the difference
-between "correct pricing math" and "safe to connect to a real trading
-account" -- a different, much larger undertaking than this project.
+## Scope
+
+What this project deliberately does not do, and why. Explicit scoping
+turns an omission into a stated boundary instead of leaving a reviewer to
+guess whether it's an oversight.
+
+**Pricing and vol surface**
+- No local vol (Dupire) or SSVI/other cross-expiry-consistent surface
+  model. `fit_svi_slice` fits one expiry at a time with no guarantee of
+  calendar-spread consistency across expiries -- that consistency is
+  exactly what SSVI's extension provides, and it isn't implemented here.
+- No stochastic vol model beyond Heston (SABR, rough vol). Heston is
+  implemented end-to-end (semi-analytic pricer, independent MC
+  cross-check, calibration); adding a second SV model is a different,
+  larger undertaking than deepening the one already here.
+- No curve-*bootstrapping* engine. `ZeroCurve` takes zero rates as direct
+  input pillars; building a curve from real market instruments (SOFR
+  futures, bond yields) is a materially different undertaking from using
+  an already-built one.
+- No separate repo/overnight financing curve. `HedgingBacktester` prices
+  the option AND accrues the cash leg's financing at the option's own
+  remaining-maturity rate -- a stated simplification (see its `__init__`
+  docstring), not a real desk's independently-curved repo rate.
+- No full trading-day calendar (exchange holidays, session-specific
+  hours). `Clock`'s `TRADING/252` convention approximates trading days as
+  5/7 of calendar days; a real holiday calendar is out of scope.
+- No exact American Greeks. `StripPricer(american=True)` reports the
+  European Black-Scholes Greeks at the CRR-solved IV, not true American
+  sensitivities -- CRR has no closed form for those, and bump-and-reprice
+  through the tree hasn't been added.
+- No Andersen-Broadie duality bounds on LSM. American Monte Carlo prices
+  remain point estimates with an MC standard error, not a certified
+  [lower, upper] interval.
+
+**Data and execution**
+- No full historical options-tick database. `Backtester`'s multi-day loop
+  is explicit about pricing off the *current* chain repeatedly unless the
+  provider supports genuine historical snapshots (Polygon's do, on a paid
+  tier above this project's key).
+- No real-time market data feed, order/execution management, or margin
+  and capital modeling -- the difference between "correct pricing math"
+  and "safe to connect to a real trading account," a different, much
+  larger undertaking than this project.
+- No kill switch, for the same reason.
+- No market-impact model. Transaction costs are a flat bps-of-notional
+  charge on every trade; there's no size-dependent slippage/impact curve.
+
+**Research methodology**
+- No claim that the hedging-band finding (see "Research finding" above)
+  generalizes beyond the regimes actually tested. Risk-aversion regimes
+  without a genuine interior optimum are reported as inconclusive
+  grid-boundary artifacts, not papered over with a number a wider search
+  would just move again.
 
 ## Setup
 
