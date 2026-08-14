@@ -1,6 +1,10 @@
 import datetime as dt
+import math
 
-from bscpp.backtest import Backtester, MockProvider, StripPricer
+import pandas as pd
+
+import bscpp
+from bscpp.backtest import Backtester, MockProvider, StripPricer, extract_forward_and_carry
 
 
 def test_mock_provider_chain_shape():
@@ -22,10 +26,17 @@ def test_strip_pricer_prices_mock_chain():
     assert not result.empty
     assert "bs_price" in result.columns
     assert "bs_error_vs_market" in result.columns
+    # OTM-only IV solving means the ITM leg at each strike is a deliberate
+    # NaN fallback (see extract_forward_and_carry / price_strip), so only
+    # check the rows that were actually priced -- and confirm there ARE
+    # some, and some legitimate fallbacks too, not an accident.
+    priced = result.dropna(subset=["bs_price"])
+    assert not priced.empty
+    assert result["bs_price"].isna().any()
     # theoretical prices should be positive and in a sane range vs spot
-    assert (result["bs_price"] >= 0).all()
+    assert (priced["bs_price"] >= 0).all()
     # BS and MC should roughly agree per-contract
-    diff = (result["bs_price"] - result["mc_price"]).abs()
+    diff = (priced["bs_price"] - priced["mc_price"]).abs()
     assert (diff < 1.0).all()
 
 
@@ -109,3 +120,78 @@ def test_polygon_provider_follows_pagination():
 
     assert len(data["results"]) == 600  # 250 + 250 + 100, all three pages
     assert len(session.calls) == 3
+
+
+def _synthetic_chain(rows):
+    """rows: list of (strike, type, price). Builds a minimal chain frame
+    with bid==ask==price (zero spread, mid == price exactly)."""
+    return pd.DataFrame([
+        {"strike": k, "type": t, "bid": p, "ask": p, "last": p}
+        for k, t, p in rows
+    ])
+
+
+def test_extract_forward_and_carry_recovers_known_forward():
+    # C - P = e^{-rT}(F-K) with F = S*e^{(r-q)T} -- build exact BS prices
+    # at a known (r, q) and check the parity-implied forward/carry match.
+    spot, rate, div, vol, t_years, strike = 100.0, 0.05, 0.02, 0.20, 1.0, 100.0
+    call = bscpp.price(spot, strike, rate, vol, t_years, "call", div)
+    put = bscpp.price(spot, strike, rate, vol, t_years, "put", div)
+    chain = _synthetic_chain([(strike, "call", call), (strike, "put", put)])
+
+    forward, carry = extract_forward_and_carry(chain, spot, t_years, rate)
+    expected_forward = spot * math.exp((rate - div) * t_years)
+    assert math.isclose(forward, expected_forward, rel_tol=1e-9)
+    assert math.isclose(carry, rate - div, abs_tol=1e-9)
+
+
+def test_extract_forward_and_carry_picks_min_abs_diff_strike():
+    # Three strikes; only the middle one's call/put pair is exactly
+    # consistent with the assumed (r, q) -- the other two are deliberately
+    # perturbed (simulating bid-ask noise away from the money). The
+    # min-|C-P| strike should still recover the true forward closely,
+    # confirming the selection logic picks the informative strike.
+    spot, rate, div, vol, t_years = 100.0, 0.05, 0.02, 0.20, 1.0
+    true_forward = spot * math.exp((rate - div) * t_years)
+    rows = []
+    for strike, noise in [(80.0, 5.0), (100.0, 0.0), (120.0, -5.0)]:
+        call = bscpp.price(spot, strike, rate, vol, t_years, "call", div) + noise
+        put = bscpp.price(spot, strike, rate, vol, t_years, "put", div)
+        rows.append((strike, "call", call))
+        rows.append((strike, "put", put))
+    chain = _synthetic_chain(rows)
+
+    forward, _ = extract_forward_and_carry(chain, spot, t_years, rate)
+    assert math.isclose(forward, true_forward, rel_tol=1e-6)  # unperturbed (K=100) pair wins
+
+
+def test_extract_forward_and_carry_nan_without_paired_quotes():
+    chain = _synthetic_chain([(100.0, "call", 5.0), (110.0, "call", 2.0)])  # calls only
+    forward, carry = extract_forward_and_carry(chain, 100.0, 1.0, 0.05)
+    assert forward != forward  # NaN
+    assert carry != carry
+
+
+def test_strip_pricer_solves_otm_only():
+    provider = MockProvider(rate=0.05, spot=100.0, base_vol=0.22)
+    pricer = StripPricer(provider, rate=0.05, mc_paths=1)
+    expiration = dt.date.today() + dt.timedelta(days=45)
+    result = pricer.price_strip("TEST", expiration, strike_range=(0.9, 1.1), use_mc=False)
+
+    assert "implied_forward" in result.columns and "implied_carry" in result.columns
+    forward = result["implied_forward"].iloc[0]
+    assert forward == forward  # a real chain has paired call/put quotes -> not NaN
+
+    calls = result[result["type"] == "call"]
+    puts = result[result["type"] == "put"]
+    # calls at/above the forward are solved (or fallback only for lack of a
+    # mid); calls BELOW the forward (ITM) are never solved, only fallback.
+    itm_calls = calls[calls["strike"] < forward]
+    otm_calls = calls[calls["strike"] >= forward]
+    assert (itm_calls["iv_source"] == "fallback").all()
+    assert (otm_calls["iv_source"] == "solved").any()
+
+    itm_puts = puts[puts["strike"] > forward]
+    otm_puts = puts[puts["strike"] <= forward]
+    assert (itm_puts["iv_source"] == "fallback").all()
+    assert (otm_puts["iv_source"] == "solved").any()

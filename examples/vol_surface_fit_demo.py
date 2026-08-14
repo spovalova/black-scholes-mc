@@ -28,13 +28,21 @@ def main():
     expiration = dt.date.today() + dt.timedelta(days=45)
 
     chain = pricer.price_strip("SPY", expiration, strike_range=(0.75, 1.25), use_mc=False)
-    calls = chain[chain["type"] == "call"]
+    # OTM-only smile: StripPricer solves calls above the implied forward
+    # and puts below (see engine.extract_forward_and_carry), so the ITM
+    # leg at each strike is a deliberate NaN fallback -- dropping it (not
+    # filtering to "calls" alone, which would silently discard the entire
+    # ITM-call half of the range) keeps every strike, just from whichever
+    # side is actually OTM there.
+    smile = chain.dropna(subset=["model_iv"]).sort_values("strike")
     t_years = float(chain["T"].iloc[0])
+    forward = float(chain["implied_forward"].iloc[0])
 
-    svi = fit_svi_slice(calls["strike"], calls["model_iv"], spot=450.0, t_years=t_years, rate=0.05)
-    rmse = svi_fit_rmse(svi, calls["strike"], calls["model_iv"], spot=450.0, rate=0.05)
+    svi = fit_svi_slice(smile["strike"], smile["model_iv"], spot=450.0, t_years=t_years, rate=0.05)
+    rmse = svi_fit_rmse(svi, smile["strike"], smile["model_iv"], spot=450.0, rate=0.05)
 
-    print(f"SVI fit ({len(calls)} call strikes, T={t_years:.3f}y):")
+    print(f"SVI fit ({len(smile)} strikes, OTM-only, T={t_years:.3f}y, "
+          f"implied forward={forward:.2f}):")
     print(f"  a={svi.a:.5f}  b={svi.b:.5f}  rho={svi.rho:.4f}  m={svi.m:.4f}  sigma={svi.sigma:.4f}")
     print(f"  fit RMSE: {rmse * 100:.2f} vol points")
 
@@ -43,13 +51,12 @@ def main():
     print(f"  Breeden-Litzenberger butterfly check: min density = {arb['min_density']:.6f} "
           f"-> {'arbitrage-free' if arb['arbitrage_free'] else 'ARBITRAGE VIOLATION'}\n")
 
-    print(f"{'strike':>8} {'market_iv':>10} {'svi_iv':>10}")
+    print(f"{'strike':>8} {'type':>5} {'market_iv':>10} {'svi_iv':>10}")
 
-    forward = 450.0 * np.exp(0.05 * t_years)
-    for _, row in calls.iterrows():
+    for _, row in smile.iterrows():
         k = np.log(row["strike"] / forward)
         svi_iv = float(svi.implied_vol(k))
-        print(f"{row['strike']:>8.1f} {row['model_iv']:>10.4f} {svi_iv:>10.4f}")
+        print(f"{row['strike']:>8.1f} {row['type']:>5} {row['model_iv']:>10.4f} {svi_iv:>10.4f}")
 
 
 if __name__ == "__main__":

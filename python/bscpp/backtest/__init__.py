@@ -1,5 +1,5 @@
 from bscpp.backtest.data_provider import DataProvider, MockProvider, PolygonProvider
-from bscpp.backtest.engine import Backtester, StripPricer
+from bscpp.backtest.engine import Backtester, StripPricer, extract_forward_and_carry
 from bscpp.backtest.frontier import (
     FrontierRegime,
     print_frontier_report,
@@ -35,6 +35,7 @@ __all__ = [
     "PolygonProvider",
     "StripPricer",
     "Backtester",
+    "extract_forward_and_carry",
     "HedgingBacktester",
     "realized_vs_implied_experiment",
     "DeltaPolicy",

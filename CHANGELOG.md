@@ -78,6 +78,30 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
   (`test_curve.py`); full suite unaffected in the flat-rate case (`resolve
   _rate` is behavior-preserving there), demonstrated with a genuine
   3-pillar curve end-to-end in `real_data_hedging_demo.py`.
+- **`bscpp.backtest.engine.extract_forward_and_carry`**: implied forward
+  and cost-of-carry from put-call parity at the strike minimizing
+  `|C-P|` (the standard desk recipe). `StripPricer` now (a) solves IV
+  OTM-only -- calls above the implied forward, puts below -- instead of
+  every row regardless of moneyness, avoiding the classic ill-conditioned
+  deep-ITM IV solve and the early-exercise-premium contamination an
+  American-style ITM quote carries that a European solver can't account
+  for, and (b) prices off the market-implied carry (`q = r -
+  implied_carry`) instead of an assumed `dividend_yield` whenever the
+  chain has paired call/put quotes. `implied_forward`/`implied_carry` are
+  new chain columns either way. 4 new tests (`test_backtest.py`).
+  **Behavior change**: roughly half of a full two-sided chain's rows are
+  now legitimately NaN (the ITM leg at each strike) rather than solved --
+  correct, but it means code that filters a chain to `type == "call"` (or
+  `"put"`) for downstream calibration/fitting now silently gets only the
+  OTM half of the strike range. Fixed at all 3 existing call sites
+  (`heston_calibration_demo.py`, `vol_surface_fit_demo.py`,
+  `test_heston.py`'s `_short_dated_mock_chain`) to instead keep both
+  types and drop the NaN rows -- the genuine OTM-only smile, not an
+  accidentally-truncated one. One of those (the Heston v0-degeneracy
+  demo/test) needed its maturity moved from 45 to 30 days: the corrected,
+  properly-conditioned OTM-only smile no longer reproduces that specific
+  failure mode at 45 days, confirming OTM-only solving was fixing a real
+  ill-conditioning problem, not just a labeling one.
 - **`bscpp.backtest.policies`** -- the rebalancing-policy ladder from the
   transaction-cost literature: `DeltaPolicy` (rebalance to exact delta,
   the baseline), `BandPolicy` (fixed no-trade band, trade to the nearest

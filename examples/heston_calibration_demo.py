@@ -24,20 +24,26 @@ def main():
     spot, rate = 450.0, 0.05
     provider = MockProvider(rate=0.05, spot=spot, base_vol=0.18, smile_strength=0.40)
     pricer = StripPricer(provider, rate=rate, mc_paths=1)
-    expiration = dt.date.today() + dt.timedelta(days=45)
+    days_to_expiry = 30  # not 45: with the corrected OTM-only smile, 45 days
+    # no longer reproduces the v0-degeneracy failure mode this demo exists to
+    # show (see test_heston.py's _short_dated_mock_chain for the same fix
+    # and a sweep of maturities that do/don't reproduce it).
+    expiration = dt.date.today() + dt.timedelta(days=days_to_expiry)
 
-    # Narrower range, calls-only, on the SAME contracts for both fits -- an
-    # apples-to-apples comparison, and it avoids the deep-tail strikes where
-    # MockProvider's synthetic noise occasionally breaks the IV solver (see
-    # StripPricer's fallback-to-0.20 behavior, documented in engine.py).
+    # Narrower range, OTM-only smile, on the SAME contracts for both fits --
+    # an apples-to-apples comparison. StripPricer solves calls above the
+    # implied forward and puts below (see engine.extract_forward_and_carry);
+    # dropping the ITM-fallback NaN rows (not filtering to "calls" alone,
+    # which would silently discard the whole ITM-call half of the range)
+    # keeps every strike, each from whichever side is actually OTM there.
     chain = pricer.price_strip("SPY", expiration, strike_range=(0.85, 1.15), use_mc=False)
-    calls = chain[chain["type"] == "call"]
+    smile = chain.dropna(subset=["model_iv"]).sort_values("strike")
     t_years = float(chain["T"].iloc[0])
-    strikes = calls["strike"].to_numpy()
-    option_types = calls["type"].tolist()
-    market_ivs = calls["model_iv"].to_numpy()
+    strikes = smile["strike"].to_numpy()
+    option_types = smile["type"].tolist()
+    market_ivs = smile["model_iv"].to_numpy()
 
-    print(f"Calibrating to {len(calls)} call strikes, T={t_years:.3f}y ({45}d)\n")
+    print(f"Calibrating to {len(smile)} strikes (OTM-only), T={t_years:.3f}y ({days_to_expiry}d)\n")
 
     heston = calibrate_heston(strikes, option_types, market_ivs, spot, t_years, rate)
     heston_rmse = heston_fit_rmse(heston, strikes, option_types, market_ivs, spot, t_years, rate)

@@ -5,6 +5,7 @@ C++ BS/MC pricers, and compares to observed market prices.
 from __future__ import annotations
 
 import datetime as dt
+import math
 
 import numpy as np
 import pandas as pd
@@ -16,6 +17,48 @@ from bscpp.curve import resolve_rate
 
 def _time_to_expiry_years(expiration: dt.date, as_of: dt.date) -> float:
     return max((expiration - as_of).days, 0) / 365.0
+
+
+def extract_forward_and_carry(chain: pd.DataFrame, spot: float, t_years: float,
+                               rate: float) -> tuple[float, float]:
+    """Implied forward and cost-of-carry from put-call parity, at the
+    strike minimizing |C-P| -- the standard desk recipe. Away from that
+    strike, parity is contaminated by wider bid-ask spreads and (for
+    American-style equity options) a growing early-exercise premium on
+    whichever leg is deep ITM; the min-|C-P| strike is close to the
+    forward itself, where both legs are near the money and neither effect
+    is large.
+
+    F = K* + e^{rT}(C-P) at that strike (mids). Returns (forward,
+    implied_carry) where implied_carry b satisfies F = spot*e^{b*T} -- b
+    bundles dividends, borrow cost, and any funding-spread noise into ONE
+    number. It is NOT a separately-identified dividend yield or borrow
+    rate (those aren't separable from option prices alone without further
+    assumptions) -- but it sidesteps needing to know either separately to
+    price at all, which is the actual point: this replaces an assumed
+    dividend_yield with a market-implied number.
+
+    Returns (nan, nan) if the chain has no strike with both a call and a
+    put quote to pair.
+    """
+    mid = chain[["bid", "ask"]].mean(axis=1).fillna(chain["last"])
+    otype = chain["type"].where(chain["type"] == "call", "put")
+    pivot = pd.DataFrame({"strike": chain["strike"], "type": otype, "mid": mid}).pivot_table(
+        index="strike", columns="type", values="mid")
+    if "call" not in pivot.columns or "put" not in pivot.columns:
+        return float("nan"), float("nan")
+    paired = pivot.dropna(subset=["call", "put"])
+    paired = paired[(paired["call"] > 0) & (paired["put"] > 0)]
+    if paired.empty:
+        return float("nan"), float("nan")
+
+    k_star = (paired["call"] - paired["put"]).abs().idxmin()
+    c, p = paired.loc[k_star, "call"], paired.loc[k_star, "put"]
+    forward = float(k_star) + math.exp(rate * t_years) * float(c - p)
+    if forward <= 0:
+        return float("nan"), float("nan")
+    implied_carry = math.log(forward / spot) / t_years
+    return forward, implied_carry
 
 
 class StripPricer:
@@ -71,7 +114,22 @@ class StripPricer:
 
         chain["mid"] = chain[["bid", "ask"]].mean(axis=1)
         chain["mid"] = chain["mid"].fillna(chain["last"])
-        otypes = chain["type"].where(chain["type"] == "call", "put").tolist()
+        otypes_series = chain["type"].where(chain["type"] == "call", "put")
+        otypes = otypes_series.tolist()
+
+        forward, implied_carry = extract_forward_and_carry(chain, spot, t_years, rate)
+        chain["implied_forward"] = forward
+        chain["implied_carry"] = implied_carry
+        # F = S*e^{(r-q)T}, so the dividend yield consistent with a given
+        # rate AND the market-implied forward is q = r - implied_carry.
+        # Pricing off this instead of self.dividend_yield replaces an
+        # ASSUMED dividend input with a market-implied one whenever the
+        # chain has paired call/put quotes to extract a forward from --
+        # eliminating the dividend-assumption problem, not just reporting
+        # implied_carry as a side diagnostic. Falls back to
+        # self.dividend_yield when forward extraction fails (e.g. a
+        # calls-only chain).
+        dividend_yield = rate - implied_carry if implied_carry == implied_carry else self.dividend_yield
 
         # --- resolve one implied vol per contract, batching the solver call ---
         # rows that already carry a usable quoted IV skip the solve entirely;
@@ -81,9 +139,26 @@ class StripPricer:
         mid = chain["mid"].to_numpy(dtype=float)
         needs_solve = ~np.isfinite(given_iv) | (given_iv <= 0)
         has_mid = np.isfinite(mid) & (mid > 0)
-        solve_mask = needs_solve & has_mid
+        # OTM-only solving (the standard desk recipe): calls above the
+        # implied forward, puts below. Deep-ITM prices are almost pure
+        # intrinsic value and barely move with vol -- solving IV from an
+        # ITM mid is the classic ill-conditioned case (the solver has to
+        # invert a nearly-flat price/vol relationship), and for American-
+        # style equity options the ITM leg also carries an early-exercise
+        # premium our European solver has no way to account for. Falls
+        # back to solving every row (the old behavior) if the chain
+        # doesn't have paired call/put quotes to extract a forward from.
+        if forward == forward:  # not NaN
+            is_call = np.array([t == "call" for t in otypes])
+            strikes = chain["strike"].to_numpy(dtype=float)
+            is_otm = np.where(is_call, strikes >= forward, strikes <= forward)
+        else:
+            is_otm = np.ones(len(chain), dtype=bool)
+        solve_mask = needs_solve & has_mid & is_otm
         # rows in needs_solve & ~has_mid have neither a quote nor a usable
-        # mid to solve from; they keep the 0.20 placeholder below.
+        # mid to solve from; rows in needs_solve & has_mid & ~is_otm are
+        # ITM and deliberately not solved. Both keep the 0.20 placeholder
+        # below and are marked "fallback" (NaN pricing outputs) -- see below.
 
         # iv_source per row: "quoted" (vendor IV used as-is), "solved" (we
         # solved it from the mid), or "fallback" (no usable quote OR the
@@ -97,7 +172,7 @@ class StripPricer:
             idx = np.flatnonzero(solve_mask)
             seed_inputs = [
                 bscpp.make_inputs(spot, chain["strike"].iat[i], rate, 0.20, t_years,
-                                   otypes[i], self.dividend_yield)
+                                   otypes[i], dividend_yield)
                 for i in idx
             ]
             solved = bscpp.bs_implied_vol_batch(seed_inputs, [mid[i] for i in idx])
@@ -116,7 +191,7 @@ class StripPricer:
         safe_ivs = np.where(priceable, model_ivs, 0.20)
         inputs_list = [
             bscpp.make_inputs(spot, chain["strike"].iat[i], rate, safe_ivs[i], t_years,
-                               otypes[i], self.dividend_yield)
+                               otypes[i], dividend_yield)
             for i in range(len(chain))
         ]
         results = bscpp.bs_price_with_greeks_batch(inputs_list)

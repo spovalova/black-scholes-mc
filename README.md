@@ -230,6 +230,20 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   and report theoretical price vs. observed market mid. Every row carries
   an `iv_source` column (`quoted`/`solved`/`fallback`); fallback rows are
   NaN rather than a silently invented vol.
+- `extract_forward_and_carry`: the implied forward and cost-of-carry from
+  put-call parity at the strike minimizing `|C-P|` (the standard desk
+  recipe -- that strike's parity estimate is least contaminated by wide
+  bid-ask spreads and early-exercise premium, both of which grow away
+  from the money). `StripPricer` uses the result two ways: it solves IV
+  **OTM-only** (calls above the implied forward, puts below -- deep-ITM
+  prices are almost pure intrinsic value, an ill-conditioned IV solve,
+  and for American-style equity options carry an early-exercise premium
+  the European solver can't account for), and it prices off the
+  **market-implied dividend/carry** (`q = r - implied_carry`) instead of
+  an assumed `dividend_yield` whenever the chain has paired call/put
+  quotes -- replacing an assumption with a market-implied number, not
+  just reporting one alongside it. `implied_forward`/`implied_carry` are
+  reported as chain columns either way.
 
 **Portfolio risk aggregation** (`bscpp.risk`)
 - `PortfolioRiskManager`: true DOLLAR delta/gamma (not raw share-equivalent

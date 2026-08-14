@@ -220,14 +220,21 @@ def test_heston_calibration_recovers_a_known_smile():
 
 
 def _short_dated_mock_chain():
+    # 30 days (not 45): StripPricer now solves OTM-only (calls above the
+    # implied forward, puts below -- see engine.extract_forward_and_carry),
+    # so a calls-only slice would silently drop the whole ITM-call half of
+    # the range. The genuine OTM-only smile keeps BOTH types and drops the
+    # ITM-fallback NaNs, giving a full-width, properly-conditioned strike
+    # range -- exactly how a real desk would build calibration inputs.
     spot, rate = 450.0, 0.05
     provider = MockProvider(rate=0.05, spot=spot, base_vol=0.18, smile_strength=0.40)
     pricer = StripPricer(provider, rate=rate, mc_paths=1)
-    expiration = dt.date.today() + dt.timedelta(days=45)
+    expiration = dt.date.today() + dt.timedelta(days=30)
     chain = pricer.price_strip("SPY", expiration, strike_range=(0.85, 1.15), use_mc=False)
-    calls = chain[chain["type"] == "call"]
+    priced = chain.dropna(subset=["model_iv"])
     t_years = float(chain["T"].iloc[0])
-    return calls["strike"].to_numpy(), calls["type"].tolist(), calls["model_iv"].to_numpy(), spot, t_years, rate
+    return (priced["strike"].to_numpy(), priced["type"].tolist(), priced["model_iv"].to_numpy(),
+            spot, t_years, rate)
 
 
 @pytest.mark.slow
