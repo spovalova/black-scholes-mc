@@ -97,6 +97,68 @@ def _heston_implied_vols(params, strikes, option_types, spot, t_years, rate, div
     return np.where(np.isfinite(ivs), ivs, 5.0)
 
 
+def _heston_iv_jacobian(params, strikes, option_types, spot, t_years, rate, dividend_yield):
+    """d(model IV)/d(kappa,theta,xi,rho,v0) at each strike, shape (n_strikes, 5).
+
+    heston_price_jacobian_batch (bscpp C++ core) returns price() plus its
+    exact partials w.r.t. all 5 Heston parameters, sharing the expensive
+    characteristic-function evaluations across every strike in ONE fixed-
+    node quadrature pass -- see heston.hpp for why this specific batching
+    matters here, not just in general: a first cut called the per-strike
+    heston_price_jacobian (its own from-scratch ADAPTIVE quadrature per
+    strike) in a Python loop and measured it ~3.6x SLOWER than scipy's
+    finite-difference fallback (97ms vs 27ms on a 13-strike calibration),
+    because it gave up exactly the cross-strike sharing heston_price_batch
+    already relies on for the value-only path while ALSO paying
+    ComplexDual5's wider per-node arithmetic. Batching fixes both.
+    (Also see dual.hpp for why this needed a second, independent
+    differentiation unit rather than literal complex-step: the
+    characteristic function already uses `i` internally, and Re() isn't
+    holomorphic.)
+
+    What calibrate_heston actually fits against is IMPLIED VOL, not price,
+    so this converts via the implicit function theorem: for
+    R(iv, param) := BS_price(iv) - HestonPrice(param) = 0 (the IV solve's
+    defining equation), d(iv)/d(param) = -(dR/dparam)/(dR/div) =
+    (dHestonPrice/dparam) / vega(iv) -- vega being d(BS_price)/d(iv),
+    already available analytically via bs_price_with_greeks_batch_arrays,
+    no finite differences needed there either.
+
+    Deep ITM/far-OTM strikes have near-zero vega (the whole reason
+    calibration is done in IV space, not price space, in the first place
+    -- see this module's docstring), which would blow up the division;
+    those rows fall back to 0 (a finite, if uninformative, Jacobian row)
+    rather than propagate inf/NaN into least_squares, matching how
+    _heston_implied_vols already handles a failed IV solve.
+    """
+    kappa, theta, xi, rho, v0 = params
+    hp = bscpp.HestonParams(kappa=kappa, theta=theta, xi=xi, rho=rho, v0=v0)
+    otypes = [bscpp.OptionType.Call if t == "call" else bscpp.OptionType.Put for t in option_types]
+
+    # Same resolution policy _heston_implied_vols uses for heston_price_batch
+    # -- the residual and its Jacobian should be evaluated at comparably
+    # accurate resolutions, not one fast-and-approximate and the other not.
+    num_nodes, phi_max = _batch_resolution_for_maturity(t_years, xi)
+    jacs = bscpp.heston_price_jacobian_batch(spot, [float(k) for k in strikes], otypes, rate,
+                                              dividend_yield, t_years, hp, num_nodes, phi_max)
+    prices = np.array([j.price for j in jacs])
+    dprice = np.array([[j.d_kappa, j.d_theta, j.d_xi, j.d_rho, j.d_v0] for j in jacs])
+
+    n = len(strikes)
+    otype_arr = (np.asarray(option_types) != "call").astype(np.int32)
+    ivs = bscpp.bs_implied_vol_batch_arrays(
+        np.full(n, spot), np.asarray(strikes, dtype=float), np.full(n, rate),
+        np.full(n, dividend_yield), np.full(n, 0.2), np.full(n, t_years), otype_arr, prices)
+    safe_ivs = np.where(np.isfinite(ivs), ivs, 0.2)
+    _, _, _, vega, _, _ = bscpp.bs_price_with_greeks_batch_arrays(
+        np.full(n, spot), np.asarray(strikes, dtype=float), np.full(n, rate),
+        np.full(n, dividend_yield), safe_ivs, np.full(n, t_years), otype_arr)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        div_iv = dprice / vega[:, None]
+    return np.where(np.isfinite(div_iv), div_iv, 0.0)
+
+
 def calibrate_heston(
     strikes,
     option_types,
@@ -108,6 +170,7 @@ def calibrate_heston(
     initial_guess: list[float] | None = None,
     max_nfev: int = 300,
     regularization_weight: float = 0.05,
+    use_analytic_jacobian: bool = True,
 ):
     """Fit Heston params to (strike, option_type, market_iv) triples at one expiry.
 
@@ -127,6 +190,26 @@ def calibrate_heston(
     of an arbitrary corner of the flat direction, without materially
     hurting fit quality when the data DOES pin the parameters down (set
     regularization_weight=0 to recover the unregularized fit and compare).
+
+    `use_analytic_jacobian` (default True) hands least_squares an exact
+    Jacobian (see _heston_iv_jacobian) computed via forward-mode automatic
+    differentiation through the Heston characteristic function -- shared
+    across the whole strike grid in one quadrature pass the same way
+    heston_price_batch shares it for the residual itself (see
+    heston_price_jacobian_batch in heston.hpp for why that batching, not
+    just "being analytic," is what actually makes this faster: a first,
+    unbatched, per-strike version measured ~3.6x SLOWER than finite
+    differences, because it gave up cross-strike sharing while paying
+    forward-mode AD's wider per-node arithmetic). The batched version
+    measures ~20% faster end-to-end on a 13-strike calibration (25.9ms vs
+    32.4ms, median of 30 runs), with matching (within 1e-3) fitted
+    parameters and RMSE to the finite-difference path -- a real, if more
+    modest than a naive "6 fewer residual evaluations per iteration"
+    estimate would suggest, win (each analytic-Jacobian call still costs
+    more per call than one heston_price_batch call, so the saving is net,
+    not the full 6x). Set False to recover the finite-difference behavior,
+    e.g. to compare fit quality/timing directly; see test_heston.py for
+    both checks.
     """
     strikes = np.asarray(strikes, dtype=float)
     market_ivs = np.asarray(market_ivs, dtype=float)
@@ -155,10 +238,28 @@ def calibrate_heston(
         ])
         return np.concatenate([main, reg])
 
+    def jacobian(params):
+        main_jac = _heston_iv_jacobian(params, strikes, option_types, spot, t_years, rate,
+                                        dividend_yield)
+        if regularization_weight <= 0.0:
+            return main_jac
+        # Regularization residuals are already linear/analytic in params --
+        # their Jacobian rows are exact by construction, not approximated:
+        # d(v0-atm_var)/d* = e_v0, d(theta-atm_var)/d* = e_theta,
+        # d((kappa-kappa_prior)/kappa_prior)/d* = e_kappa/kappa_prior.
+        scale = np.sqrt(regularization_weight)
+        reg_jac = scale * np.array([
+            [0.0, 0.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 0.0, 0.0],
+            [1.0 / kappa_prior, 0.0, 0.0, 0.0, 0.0],
+        ])
+        return np.vstack([main_jac, reg_jac])
+
     if initial_guess is None:
         initial_guess = [kappa_prior, atm_var, 0.5, -0.5, atm_var]
 
     result = least_squares(residuals, x0=initial_guess, bounds=(_LOWER_BOUNDS, _UPPER_BOUNDS),
+                            jac=jacobian if use_analytic_jacobian else "2-point",
                             max_nfev=max_nfev, xtol=1e-10, ftol=1e-10)
     kappa, theta, xi, rho, v0 = result.x
     return bscpp.HestonParams(kappa=kappa, theta=theta, xi=xi, rho=rho, v0=v0)

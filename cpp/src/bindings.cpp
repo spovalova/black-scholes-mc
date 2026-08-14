@@ -247,6 +247,35 @@ PYBIND11_MODULE(_core, m) {
           "more convenient, than calling heston_price in a loop, and for when it isn't.");
     m.def("heston_satisfies_feller_condition", &HestonPricer::satisfies_feller_condition,
           py::arg("params"));
+
+    py::class_<HestonJacobian>(m, "HestonJacobian")
+        .def_readwrite("price", &HestonJacobian::price)
+        .def_readwrite("d_kappa", &HestonJacobian::d_kappa)
+        .def_readwrite("d_theta", &HestonJacobian::d_theta)
+        .def_readwrite("d_xi", &HestonJacobian::d_xi)
+        .def_readwrite("d_rho", &HestonJacobian::d_rho)
+        .def_readwrite("d_v0", &HestonJacobian::d_v0)
+        .def("__repr__", [](const HestonJacobian& j) {
+            return "HestonJacobian(price=" + std::to_string(j.price) +
+                   ", d_kappa=" + std::to_string(j.d_kappa) +
+                   ", d_theta=" + std::to_string(j.d_theta) +
+                   ", d_xi=" + std::to_string(j.d_xi) + ", d_rho=" + std::to_string(j.d_rho) +
+                   ", d_v0=" + std::to_string(j.d_v0) + ")";
+        });
+    m.def("heston_price_jacobian", &HestonPricer::price_jacobian, py::arg("spot"),
+          py::arg("strike"), py::arg("rate"), py::arg("dividend_yield"), py::arg("maturity"),
+          py::arg("type"), py::arg("params"), py::call_guard<py::gil_scoped_release>(),
+          "price() plus its exact partials w.r.t. all 5 Heston parameters in one pass "
+          "(forward-mode AD, not finite differences) -- see heston.hpp for why this needs a "
+          "second, independent differentiation unit rather than literal complex-step, and "
+          "bscpp.backtest.heston_calibration for how calibrate_heston uses it.");
+    m.def("heston_price_jacobian_batch", &HestonPricer::price_jacobian_batch, py::arg("spot"),
+          py::arg("strikes"), py::arg("types"), py::arg("rate"), py::arg("dividend_yield"),
+          py::arg("maturity"), py::arg("params"), py::arg("num_nodes") = 1500,
+          py::arg("phi_max") = 150.0, py::call_guard<py::gil_scoped_release>(),
+          "heston_price_jacobian, batched across a strike grid the same way "
+          "heston_price_batch batches heston_price -- see heston.hpp for why the per-strike "
+          "version alone is NOT a win over finite differences (measured ~3.6x slower).");
     m.def("heston_price_cos", &HestonPricer::price_cos, py::arg("spot"), py::arg("strike"),
           py::arg("rate"), py::arg("dividend_yield"), py::arg("maturity"), py::arg("type"),
           py::arg("params"), py::arg("num_terms") = 160, py::call_guard<py::gil_scoped_release>(),

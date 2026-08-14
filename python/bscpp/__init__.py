@@ -10,6 +10,7 @@ except Exception:  # pragma: no cover - not installed as a distribution
 from bscpp._core import (
     AmericanPricer,
     Greeks,
+    HestonJacobian,
     HestonMCPricer,
     HestonParams,
     MarketInputs,
@@ -30,6 +31,8 @@ from bscpp._core import (
     heston_price,
     heston_price_batch,
     heston_price_cos,
+    heston_price_jacobian,
+    heston_price_jacobian_batch,
     heston_satisfies_feller_condition,
 )
 from bscpp.clock import Clock
@@ -66,11 +69,14 @@ __all__ = [
     "bs_price_with_greeks_batch_arrays",
     "crr_price",
     "crr_implied_vol",
+    "HestonJacobian",
     "HestonMCPricer",
     "HestonParams",
     "heston_price",
     "heston_price_batch",
     "heston_price_cos",
+    "heston_price_jacobian",
+    "heston_price_jacobian_batch",
     "heston_satisfies_feller_condition",
     "make_inputs",
     "price",

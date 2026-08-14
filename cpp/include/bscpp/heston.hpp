@@ -21,6 +21,17 @@ struct HestonParams {
     double v0;     // initial (instantaneous) variance
 };
 
+// price() plus its analytic partial derivatives w.r.t. each of
+// kappa/theta/xi/rho/v0 -- see HestonPricer::price_jacobian.
+struct HestonJacobian {
+    double price;
+    double d_kappa;
+    double d_theta;
+    double d_xi;
+    double d_rho;
+    double d_v0;
+};
+
 // Semi-analytic pricer via the Heston characteristic function.
 class HestonPricer {
 public:
@@ -79,6 +90,62 @@ public:
     // practice, and the pricer still works (variance just clamped at 0) but
     // the model interpretation as "always-positive variance" no longer holds.
     static bool satisfies_feller_condition(const HestonParams& hp);
+
+    // price() plus its exact partial derivatives w.r.t. all five Heston
+    // parameters, computed in ONE pass via forward-mode automatic
+    // differentiation (dual.hpp's ComplexDual5/RealDual5) rather than
+    // scipy's default finite-difference Jacobian -- calibrate_heston
+    // (heston_calibration.py) uses this to avoid the ~6 full residual
+    // evaluations per iteration (1 base + 5 perturbed) a finite-difference
+    // Jacobian costs, and the O(sqrt(eps)) truncation error that comes
+    // with it.
+    //
+    // NOT literal complex-step (kappa -> kappa + i*h): char_function
+    // already uses the imaginary unit `i` internally for the Fourier
+    // phase factor, and probability() extracts Re[...] from the integrand
+    // at every quadrature node before integrating -- Re() is not
+    // holomorphic, so reusing `i` for the perturbation would corrupt
+    // exactly the real/imaginary split that Re[] depends on (worked
+    // through by hand, not discovered by a wrong first attempt -- see
+    // dual.hpp). Mathematically equivalent to multicomplex-step (Lantoine,
+    // Russell & Dargent 2012): a second, independent differentiation unit
+    // per parameter that commutes exactly with Re()/Im() because it's
+    // real-linear, sidestepping the issue entirely -- same zero-
+    // cancellation, no-tuning-parameter guarantee true complex-step gives
+    // for ordinary real functions.
+    //
+    // Shares char_function_impl (templated on scalar type, see the .cpp)
+    // with price() itself -- ONE formula, two instantiations (T=double for
+    // price(), T=ComplexDual5 here), not a hand-duplicated second copy
+    // that could silently drift from the first (the same reasoning behind
+    // extracting brent.hpp). Verified against central finite differences
+    // on price() across the same stress regimes price_cos was validated
+    // against (short maturity, badly Feller-violating vol-of-vol,
+    // dividends); see test_heston.py.
+    static HestonJacobian price_jacobian(double spot, double strike, double rate,
+                                          double dividend_yield, double maturity, OptionType type,
+                                          const HestonParams& hp);
+
+    // price_jacobian, batched across a whole strike grid the same way
+    // price_batch batches price() -- and for the same reason. A first cut
+    // at calibrate_heston's analytic Jacobian called price_jacobian in a
+    // per-strike Python loop and measured it ~3.6x SLOWER than letting
+    // scipy fall back to finite differences (97ms vs 27ms on a 13-strike
+    // calibration): each price_jacobian call redid its own adaptive
+    // quadrature from scratch, giving up exactly the cross-strike
+    // characteristic-function sharing price_batch exists for, while ALSO
+    // paying ComplexDual5's ~5x wider per-node arithmetic -- fighting the
+    // very optimization the finite-difference path got to keep (it calls
+    // the already-batched, already-fast heston_price_batch 6 times). This
+    // batches the Jacobian computation the same way, so it wins for the
+    // reason it should: not because forward-mode AD is inherently fast,
+    // but because it can share the expensive part across strikes exactly
+    // like the value-only path already does. See test_heston.py for the
+    // measured speedup this version actually achieves.
+    static std::vector<HestonJacobian> price_jacobian_batch(
+        double spot, const std::vector<double>& strikes, const std::vector<OptionType>& types,
+        double rate, double dividend_yield, double maturity, const HestonParams& hp,
+        int num_nodes = 1500, double phi_max = 150.0);
 
     // Fang & Oosterlee (2008) COS method: a fixed-node Fourier-cosine
     // series expansion, sharing the SAME characteristic function as

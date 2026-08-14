@@ -6,6 +6,7 @@
 #include <functional>
 #include <stdexcept>
 
+#include "bscpp/dual.hpp"
 #include "bscpp/portable_normal.hpp"
 
 namespace bscpp {
@@ -29,32 +30,43 @@ constexpr double kPi = 3.14159265358979323846;
 // rule for smooth cases, while also being more accurate (not less) on the
 // oscillatory/short-maturity cases the fixed rule was never verified
 // against.
-double adaptive_simpson_recursive(const std::function<double(double)>& f, double a, double b,
-                                   double fa, double fm, double fb, double whole, double tol,
-                                   int depth) {
+// Templated on the integrand's return type T (double for the original
+// value-only quadrature; RealDual5 for the Jacobian, see char_function_impl
+// below) so both share ONE copy of the adaptive-refinement logic instead
+// of a hand-duplicated second implementation. The Richardson-extrapolation
+// arithmetic and error control both flow through T (via RealDual5's own
+// +,-,*,/ and abs_value(), see dual.hpp), with abs_value() specifically
+// so refinement is always driven by how well the integral's VALUE is
+// resolved -- not its derivatives, which have no natural single scalar to
+// compare against tol and simply come along for the ride at whatever
+// nodes the value-driven refinement already chose.
+template <typename T>
+T adaptive_simpson_recursive(const std::function<T(double)>& f, double a, double b, T fa, T fm,
+                              T fb, T whole, double tol, int depth) {
     constexpr int kMaxDepth = 40;
     const double m = 0.5 * (a + b);
     const double lm = 0.5 * (a + m);
     const double rm = 0.5 * (m + b);
-    const double flm = f(lm);
-    const double frm = f(rm);
-    const double left = (m - a) / 6.0 * (fa + 4.0 * flm + fm);
-    const double right = (b - m) / 6.0 * (fm + 4.0 * frm + fb);
-    const double combined = left + right;
+    const T flm = f(lm);
+    const T frm = f(rm);
+    const T left = (fa + flm * 4.0 + fm) * ((m - a) / 6.0);
+    const T right = (fm + frm * 4.0 + fb) * ((b - m) / 6.0);
+    const T combined = left + right;
 
-    if (depth >= kMaxDepth || std::abs(combined - whole) <= 15.0 * tol) {
+    if (depth >= kMaxDepth || abs_value(combined - whole) <= 15.0 * tol) {
         return combined + (combined - whole) / 15.0;  // Richardson extrapolation
     }
-    return adaptive_simpson_recursive(f, a, m, fa, flm, fm, left, tol / 2.0, depth + 1) +
-           adaptive_simpson_recursive(f, m, b, fm, frm, fb, right, tol / 2.0, depth + 1);
+    return adaptive_simpson_recursive<T>(f, a, m, fa, flm, fm, left, tol / 2.0, depth + 1) +
+           adaptive_simpson_recursive<T>(f, m, b, fm, frm, fb, right, tol / 2.0, depth + 1);
 }
 
-double adaptive_simpson(const std::function<double(double)>& f, double a, double b, double tol) {
-    const double fa = f(a);
-    const double fb = f(b);
-    const double fm = f(0.5 * (a + b));
-    const double whole = (b - a) / 6.0 * (fa + 4.0 * fm + fb);
-    return adaptive_simpson_recursive(f, a, b, fa, fm, fb, whole, tol, 0);
+template <typename T>
+T adaptive_simpson(const std::function<T(double)>& f, double a, double b, double tol) {
+    const T fa = f(a);
+    const T fb = f(b);
+    const T fm = f(0.5 * (a + b));
+    const T whole = (fa + fm * 4.0 + fb) * ((b - a) / 6.0);
+    return adaptive_simpson_recursive<T>(f, a, b, fa, fm, fb, whole, tol, 0);
 }
 
 // Integrates f from near-0 to infinity by adaptive-Simpson-ing an initial
@@ -64,17 +76,18 @@ double adaptive_simpson(const std::function<double(double)>& f, double a, double
 // explicitly UNVERIFIED) with a self-terminating, measured stopping
 // condition -- the integral only stops growing the domain once the tail
 // itself proves negligible, whatever the parameters.
-double integrate_to_infinity(const std::function<double(double)>& f, double tol) {
+template <typename T>
+T integrate_to_infinity(const std::function<T(double)>& f, double tol) {
     double lo = 1e-8;
     double hi = 50.0;
-    double total = adaptive_simpson(f, lo, hi, tol);
+    T total = adaptive_simpson<T>(f, lo, hi, tol);
     constexpr int kMaxExtensions = 12;  // hi grows to 50*2^12 ~ 2e5 in the worst case
     for (int i = 0; i < kMaxExtensions; ++i) {
         const double next_hi = hi * 2.0;
-        const double segment = adaptive_simpson(f, hi, next_hi, tol);
-        total += segment;
+        const T segment = adaptive_simpson<T>(f, hi, next_hi, tol);
+        total = total + segment;
         hi = next_hi;
-        if (std::abs(segment) < tol) {
+        if (abs_value(segment) < tol) {
             break;
         }
     }
@@ -125,37 +138,68 @@ double cos_psi(double k, double a, double b, double c, double d) {
     return (std::sin(u * (d - a)) - std::sin(u * (c - a))) / u;
 }
 
+// The Heston (1993) / "Little Trap" characteristic function, templated on
+// the scalar type T used for kappa/theta/xi/rho/v0. T=double reproduces
+// today's exact arithmetic (mixing plain double hp-fields with cdouble
+// phi, exactly as before templating -- verified byte-for-byte unchanged
+// in test_heston.py, not just assumed from the refactor being
+// "mechanical"). T=ComplexDual5 (dual.hpp) computes the SAME formula
+// while additionally propagating derivatives w.r.t. whichever of
+// kappa/theta/xi/rho/v0 were seeded via ComplexDual5::variable -- used by
+// HestonPricer::price_jacobian below.
+//
+// Templating (one formula, two instantiations) rather than hand-writing a
+// second copy for the Jacobian path is deliberate: this project extracted
+// brent.hpp for the same reason (a second copy of the same logic is a
+// second place for a transcription error to hide, invisible until it
+// disagrees with the first copy on some untested input).
+//
+// `using std::sqrt;` etc. below + unqualified calls is what lets normal
+// C++ lookup pick std::sqrt/exp/log for T=double's cdouble/double
+// arguments and bscpp::sqrt/exp/log (dual.hpp, found via ADL since
+// ComplexDual5 lives in namespace bscpp) for T=ComplexDual5 -- the same
+// customization-point idiom std::swap relies on.
+template <typename T>
+auto char_function_impl(cdouble phi, double spot, double rate, double dividend_yield,
+                         double maturity, T kappa, T theta, T xi, T rho, T v0, int j) {
+    using std::exp;
+    using std::log;
+    using std::sqrt;
+    const cdouble i(0.0, 1.0);
+    const double u = (j == 1) ? 0.5 : -0.5;
+    const auto b = (j == 1) ? (kappa - rho * xi) : kappa;
+    const auto a = kappa * theta;
+    const auto xi2 = xi * xi;
+
+    const auto rho_xi_i_phi = rho * xi * i * phi;
+    const auto d = sqrt((rho_xi_i_phi - b) * (rho_xi_i_phi - b) -
+                         xi2 * (2.0 * u * i * phi - phi * phi));
+
+    // "Little Trap" form: c = 1/g, using exp(-d*tau) (bounded, since
+    // std::sqrt's principal branch keeps Re(d) >= 0) instead of exp(+d*tau)
+    // -- this is what keeps the log() below from winding around its branch
+    // cut as phi or tau grows, unlike the original Heston (1993) formula.
+    const auto bmr = b - rho_xi_i_phi;  // "b minus rho*xi*i*phi"
+    const auto c = (bmr - d) / (bmr + d);
+
+    const auto exp_neg_d_tau = exp(-d * maturity);
+    const auto log_term = log((1.0 - c * exp_neg_d_tau) / (1.0 - c));
+
+    const auto C = (rate - dividend_yield) * i * phi * maturity +
+                    (a / xi2) * ((bmr - d) * maturity - 2.0 * log_term);
+    const auto D = ((bmr - d) / xi2) * ((1.0 - exp_neg_d_tau) / (1.0 - c * exp_neg_d_tau));
+
+    return exp(C + D * v0 + i * phi * std::log(spot));
+}
+
 }  // namespace
 
 std::complex<double> HestonPricer::char_function(std::complex<double> phi, double spot,
                                                     double rate, double dividend_yield,
                                                     double maturity, const HestonParams& hp,
                                                     int j) {
-    const cdouble i(0.0, 1.0);
-    const double u = (j == 1) ? 0.5 : -0.5;
-    const double b = (j == 1) ? (hp.kappa - hp.rho * hp.xi) : hp.kappa;
-    const double a = hp.kappa * hp.theta;
-    const double xi2 = hp.xi * hp.xi;
-
-    const cdouble rho_xi_i_phi = hp.rho * hp.xi * i * phi;
-    const cdouble d = std::sqrt((rho_xi_i_phi - b) * (rho_xi_i_phi - b) -
-                                 xi2 * (2.0 * u * i * phi - phi * phi));
-
-    // "Little Trap" form: c = 1/g, using exp(-d*tau) (bounded, since
-    // std::sqrt's principal branch keeps Re(d) >= 0) instead of exp(+d*tau)
-    // -- this is what keeps the log() below from winding around its branch
-    // cut as phi or tau grows, unlike the original Heston (1993) formula.
-    const cdouble bmr = b - rho_xi_i_phi;  // "b minus rho*xi*i*phi"
-    const cdouble c = (bmr - d) / (bmr + d);
-
-    const cdouble exp_neg_d_tau = std::exp(-d * maturity);
-    const cdouble log_term = std::log((1.0 - c * exp_neg_d_tau) / (1.0 - c));
-
-    const cdouble C = (rate - dividend_yield) * i * phi * maturity +
-                       (a / xi2) * ((bmr - d) * maturity - 2.0 * log_term);
-    const cdouble D = ((bmr - d) / xi2) * ((1.0 - exp_neg_d_tau) / (1.0 - c * exp_neg_d_tau));
-
-    return std::exp(C + D * hp.v0 + i * phi * std::log(spot));
+    return char_function_impl<double>(phi, spot, rate, dividend_yield, maturity, hp.kappa,
+                                       hp.theta, hp.xi, hp.rho, hp.v0, j);
 }
 
 double HestonPricer::probability(double spot, double strike, double rate, double dividend_yield,
@@ -177,9 +221,41 @@ double HestonPricer::probability(double spot, double strike, double rate, double
     // since dividing a ~1e-8-scale imaginary part by ~1e-8 doesn't
     // destabilize in double precision, but still worth naming as a
     // simplification rather than a proven-exact treatment).
-    const double integral = integrate_to_infinity(integrand, 1e-10);
+    const double integral = integrate_to_infinity<double>(integrand, 1e-10);
     return 0.5 + integral / kPi;
 }
+
+namespace {
+
+// Jacobian counterpart of HestonPricer::probability: same formula, same
+// quadrature, but with kappa/theta/xi/rho/v0 passed in as ComplexDual5 (at
+// most one -- or, for price_jacobian below, all five at once via vector
+// forward-mode AD -- actually seeded as a differentiation variable) so the
+// integral comes back as a RealDual5 carrying d(P_j)/d(param) alongside
+// the value itself. See char_function_impl and dual.hpp for why this
+// needs a second (still holomorphic, still Re()-exact) imaginary "unit"
+// rather than literal complex-step.
+RealDual5 probability_jacobian(double spot, double strike, double rate, double dividend_yield,
+                                double maturity, const ComplexDual5& kappa,
+                                const ComplexDual5& theta, const ComplexDual5& xi,
+                                const ComplexDual5& rho, const ComplexDual5& v0, int j) {
+    const cdouble i(0.0, 1.0);
+    const double log_strike = std::log(strike);
+
+    auto integrand = [&](double phi_real) -> RealDual5 {
+        const cdouble phi(phi_real, 0.0);
+        const ComplexDual5 cf = char_function_impl<ComplexDual5>(phi, spot, rate, dividend_yield,
+                                                                    maturity, kappa, theta, xi,
+                                                                    rho, v0, j);
+        const ComplexDual5 numerator = ComplexDual5(std::exp(-i * phi * log_strike)) * cf;
+        return real_part(numerator / ComplexDual5(i * phi));
+    };
+
+    const RealDual5 integral = integrate_to_infinity<RealDual5>(integrand, 1e-10);
+    return RealDual5(0.5) + integral / kPi;
+}
+
+}  // namespace
 
 double HestonPricer::price(double spot, double strike, double rate, double dividend_yield,
                             double maturity, OptionType type, const HestonParams& hp) {
@@ -255,6 +331,111 @@ std::vector<double> HestonPricer::price_batch(double spot, const std::vector<dou
 
 bool HestonPricer::satisfies_feller_condition(const HestonParams& hp) {
     return 2.0 * hp.kappa * hp.theta >= hp.xi * hp.xi;
+}
+
+HestonJacobian HestonPricer::price_jacobian(double spot, double strike, double rate,
+                                             double dividend_yield, double maturity,
+                                             OptionType type, const HestonParams& hp) {
+    // Seed all five parameters at once (vector forward-mode AD): each
+    // gets derivative 1 w.r.t. itself and 0 w.r.t. the other four, so a
+    // SINGLE pass through probability_jacobian's quadrature recovers all
+    // 5 partials together, not one pass per parameter.
+    const ComplexDual5 kappa = ComplexDual5::variable(hp.kappa, 0);
+    const ComplexDual5 theta = ComplexDual5::variable(hp.theta, 1);
+    const ComplexDual5 xi = ComplexDual5::variable(hp.xi, 2);
+    const ComplexDual5 rho = ComplexDual5::variable(hp.rho, 3);
+    const ComplexDual5 v0 = ComplexDual5::variable(hp.v0, 4);
+
+    const RealDual5 p1 =
+        probability_jacobian(spot, strike, rate, dividend_yield, maturity, kappa, theta, xi, rho,
+                              v0, 1);
+    const RealDual5 p2 =
+        probability_jacobian(spot, strike, rate, dividend_yield, maturity, kappa, theta, xi, rho,
+                              v0, 2);
+
+    const double disc_q = std::exp(-dividend_yield * maturity);
+    const double disc_r = std::exp(-rate * maturity);
+
+    const RealDual5 call = p1 * (spot * disc_q) - p2 * (strike * disc_r);
+    const RealDual5 raw = (type == OptionType::Call)
+                               ? call
+                               : call - RealDual5(spot * disc_q) + RealDual5(strike * disc_r);
+
+    // Same no-arbitrage floor price() applies (std::max(price, 0.0)) --
+    // but max(x,0) isn't differentiable exactly at x=0, so its correct
+    // subgradient (0 for every partial) is used explicitly here rather
+    // than left ambiguous. Only matters for parameter combinations that
+    // would ALREADY be numerically dubious for price() itself (deep OTM,
+    // short-dated) -- a calibration converging near that floor has a
+    // separate, existing problem the Jacobian can't paper over.
+    if (raw.value <= 0.0) {
+        return {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    }
+    return {raw.value,       raw.deriv[0], raw.deriv[1],
+             raw.deriv[2],    raw.deriv[3], raw.deriv[4]};
+}
+
+std::vector<HestonJacobian> HestonPricer::price_jacobian_batch(
+    double spot, const std::vector<double>& strikes, const std::vector<OptionType>& types,
+    double rate, double dividend_yield, double maturity, const HestonParams& hp, int num_nodes,
+    double phi_max) {
+    if (strikes.size() != types.size()) {
+        throw std::invalid_argument("strikes and types must be the same length");
+    }
+
+    const ComplexDual5 kappa = ComplexDual5::variable(hp.kappa, 0);
+    const ComplexDual5 theta = ComplexDual5::variable(hp.theta, 1);
+    const ComplexDual5 xi = ComplexDual5::variable(hp.xi, 2);
+    const ComplexDual5 rho = ComplexDual5::variable(hp.rho, 3);
+    const ComplexDual5 v0 = ComplexDual5::variable(hp.v0, 4);
+
+    constexpr double kEps = 1e-8;
+    std::vector<double> nodes, weights;
+    fixed_simpson_grid(kEps, phi_max, num_nodes, nodes, weights);
+
+    // Same sharing price_batch relies on: char_function (now
+    // char_function_impl<ComplexDual5>) does not depend on strike, so
+    // it's evaluated once per node -- INCLUDING its 5 derivatives -- and
+    // reused across every strike below, instead of redoing the whole
+    // (5x wider) dual-number quadrature from scratch per strike.
+    std::vector<ComplexDual5> cf1(nodes.size()), cf2(nodes.size());
+    for (size_t k = 0; k < nodes.size(); ++k) {
+        const cdouble phi(nodes[k], 0.0);
+        cf1[k] = char_function_impl<ComplexDual5>(phi, spot, rate, dividend_yield, maturity,
+                                                     kappa, theta, xi, rho, v0, 1);
+        cf2[k] = char_function_impl<ComplexDual5>(phi, spot, rate, dividend_yield, maturity,
+                                                     kappa, theta, xi, rho, v0, 2);
+    }
+
+    const cdouble i(0.0, 1.0);
+    const double disc_q = std::exp(-dividend_yield * maturity);
+    const double disc_r = std::exp(-rate * maturity);
+
+    std::vector<HestonJacobian> out(strikes.size());
+    for (size_t s = 0; s < strikes.size(); ++s) {
+        const double log_strike = std::log(strikes[s]);
+        RealDual5 integral1(0.0), integral2(0.0);
+        for (size_t k = 0; k < nodes.size(); ++k) {
+            const cdouble phi(nodes[k], 0.0);
+            const ComplexDual5 phase(std::exp(-i * phi * log_strike));
+            integral1 = integral1 + real_part(phase * cf1[k] / ComplexDual5(i * phi)) * weights[k];
+            integral2 = integral2 + real_part(phase * cf2[k] / ComplexDual5(i * phi)) * weights[k];
+        }
+        const RealDual5 p1 = RealDual5(0.5) + integral1 / kPi;
+        const RealDual5 p2 = RealDual5(0.5) + integral2 / kPi;
+
+        const RealDual5 call = p1 * (spot * disc_q) - p2 * (strikes[s] * disc_r);
+        const RealDual5 raw = (types[s] == OptionType::Call)
+                                   ? call
+                                   : call - RealDual5(spot * disc_q) +
+                                         RealDual5(strikes[s] * disc_r);
+
+        out[s] = (raw.value <= 0.0)
+                     ? HestonJacobian{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}
+                     : HestonJacobian{raw.value,    raw.deriv[0], raw.deriv[1],
+                                        raw.deriv[2], raw.deriv[3], raw.deriv[4]};
+    }
+    return out;
 }
 
 namespace {

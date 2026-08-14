@@ -13,7 +13,10 @@ from bscpp.backtest import (
     calibrate_heston_with_stability,
     heston_fit_rmse,
 )
-from bscpp.backtest.heston_calibration import _batch_resolution_for_maturity
+from bscpp.backtest.heston_calibration import (
+    _batch_resolution_for_maturity,
+    _heston_iv_jacobian,
+)
 
 
 def test_heston_collapses_to_black_scholes_as_vol_of_vol_shrinks():
@@ -267,6 +270,137 @@ def test_feller_condition():
     violated = bscpp.HestonParams(kappa=1.0, theta=0.02, xi=2.0, rho=-0.5, v0=0.02)
     assert bscpp.heston_satisfies_feller_condition(satisfied)
     assert not bscpp.heston_satisfies_feller_condition(violated)
+
+
+def test_heston_price_jacobian_matches_finite_differences_across_stress_regimes():
+    # heston_price_jacobian computes price() plus its exact partials
+    # w.r.t. kappa/theta/xi/rho/v0 via forward-mode AD (see heston.hpp/
+    # dual.hpp) -- cross-checked here against central finite differences
+    # on heston_price itself, across the same stress regimes heston_price
+    # and heston_price_cos were both validated against. Central
+    # differences are only accurate to ~1e-6 relative themselves, so the
+    # tolerance below is set by the REFERENCE's precision, not an
+    # arbitrarily loose bar.
+    regimes = [
+        ("normal ATM call", 1.0, 100.0, bscpp.OptionType.Call,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)),
+        ("normal OTM put", 1.0, 90.0, bscpp.OptionType.Put,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)),
+        ("1-day maturity", 1 / 365, 100.0, bscpp.OptionType.Call,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.04)),
+        ("Feller-violating", 1.0, 100.0, bscpp.OptionType.Call,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=3.0, rho=-0.7, v0=0.04)),
+        ("worst case: 1-day + xi=3.0", 1 / 365, 100.0, bscpp.OptionType.Call,
+         bscpp.HestonParams(kappa=5.0, theta=0.04, xi=3.0, rho=-0.5, v0=0.04)),
+        ("with dividend", 1.0, 100.0, bscpp.OptionType.Call,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)),
+    ]
+    spot, rate = 100.0, 0.05
+    param_names = ["kappa", "theta", "xi", "rho", "v0"]
+
+    for name, maturity, strike, opt_type, hp in regimes:
+        div = 0.03 if name == "with dividend" else 0.0
+        jac = bscpp.heston_price_jacobian(spot, strike, rate, div, maturity, opt_type, hp)
+        adaptive = bscpp.heston_price(spot, strike, rate, div, maturity, opt_type, hp)
+        assert math.isclose(jac.price, adaptive, rel_tol=1e-8), name
+
+        base = {"kappa": hp.kappa, "theta": hp.theta, "xi": hp.xi, "rho": hp.rho, "v0": hp.v0}
+        analytic = [jac.d_kappa, jac.d_theta, jac.d_xi, jac.d_rho, jac.d_v0]
+        for pname, deriv in zip(param_names, analytic):
+            h = max(1e-6, abs(base[pname]) * 1e-6)
+            bumped = dict(base)
+            bumped[pname] = base[pname] + h
+            p_plus = bscpp.heston_price(spot, strike, rate, div, maturity, opt_type,
+                                         bscpp.HestonParams(**bumped))
+            bumped[pname] = base[pname] - h
+            p_minus = bscpp.heston_price(spot, strike, rate, div, maturity, opt_type,
+                                          bscpp.HestonParams(**bumped))
+            fd = (p_plus - p_minus) / (2 * h)
+            assert math.isclose(deriv, fd, abs_tol=2e-4, rel_tol=2e-3), f"{name} d/d{pname}"
+
+
+def test_heston_price_jacobian_batch_matches_single_price_jacobian():
+    # heston_price_jacobian_batch shares characteristic-function
+    # evaluations (now including their derivatives) across strikes via a
+    # fixed grid, exactly like heston_price_batch does for price() alone
+    # -- verified here against the per-strike heston_price_jacobian, not
+    # assumed to inherit its accuracy for free.
+    spot, rate, div, maturity = 100.0, 0.05, 0.01, 0.75
+    hp = bscpp.HestonParams(kappa=2.0, theta=0.045, xi=0.5, rho=-0.6, v0=0.05)
+    strikes = [70.0, 80.0, 90.0, 95.0, 100.0, 105.0, 110.0, 120.0, 130.0]
+    types = [bscpp.OptionType.Put] * 4 + [bscpp.OptionType.Call] * 5
+
+    batch = bscpp.heston_price_jacobian_batch(spot, strikes, types, rate, div, maturity, hp)
+    for k, t, b in zip(strikes, types, batch):
+        single = bscpp.heston_price_jacobian(spot, k, rate, div, maturity, t, hp)
+        assert math.isclose(b.price, single.price, abs_tol=1e-3, rel_tol=1e-3)
+        for field in ("d_kappa", "d_theta", "d_xi", "d_rho", "d_v0"):
+            assert math.isclose(getattr(b, field), getattr(single, field), abs_tol=1e-3,
+                                 rel_tol=1e-3), field
+
+
+def test_heston_iv_jacobian_matches_numerical_jacobian():
+    # _heston_iv_jacobian converts the price-space Jacobian above into
+    # IV-space via the implicit function theorem (d(iv)/d(param) =
+    # dPrice/dparam / vega) -- cross-checked here at the level
+    # calibrate_heston actually consumes it, against a plain central
+    # difference on _heston_implied_vols itself (the function that
+    # produces calibrate_heston's residuals).
+    from bscpp.backtest.heston_calibration import _heston_implied_vols
+
+    strikes = np.array([80.0, 90.0, 95.0, 100.0, 105.0, 110.0, 120.0])
+    option_types = ["put", "put", "put", "call", "call", "call", "call"]
+    spot, t_years, rate, div = 100.0, 0.75, 0.04, 0.01
+    params = [2.0, 0.045, 0.5, -0.6, 0.05]
+
+    analytic = _heston_iv_jacobian(params, strikes, option_types, spot, t_years, rate, div)
+
+    numeric = np.zeros_like(analytic)
+    for j in range(5):
+        h = max(1e-6, abs(params[j]) * 1e-6)
+        plus, minus = list(params), list(params)
+        plus[j] += h
+        minus[j] -= h
+        iv_plus = _heston_implied_vols(plus, strikes, option_types, spot, t_years, rate, div)
+        iv_minus = _heston_implied_vols(minus, strikes, option_types, spot, t_years, rate, div)
+        numeric[:, j] = (iv_plus - iv_minus) / (2 * h)
+
+    diff = np.abs(analytic - numeric)
+    reldiff = diff / np.maximum(np.abs(numeric), 1e-6)
+    assert np.all((diff < 1e-4) | (reldiff < 1e-2))
+
+
+def test_calibrate_heston_analytic_jacobian_matches_finite_difference_fit():
+    # The whole point of use_analytic_jacobian is to be a faster drop-in
+    # for scipy's default finite-difference Jacobian, not a different
+    # optimization problem -- both should converge to essentially the
+    # same fit on the same data.
+    strikes = [70, 75, 80, 85, 90, 95, 100, 105, 110, 115, 120, 125, 130]
+    option_types = ["put"] * 6 + ["call"] * 7
+    spot, t_years, rate, div = 100.0, 0.5, 0.04, 0.01
+    true_hp = bscpp.HestonParams(kappa=2.0, theta=0.045, xi=0.5, rho=-0.6, v0=0.05)
+    otypes = [bscpp.OptionType.Call if t == "call" else bscpp.OptionType.Put for t in option_types]
+    prices = bscpp.heston_price_batch(spot, [float(k) for k in strikes], otypes, rate, div,
+                                       t_years, true_hp)
+    n = len(strikes)
+    otype_arr = (np.asarray(option_types) != "call").astype(np.int32)
+    market_ivs = bscpp.bs_implied_vol_batch_arrays(
+        np.full(n, spot), np.asarray(strikes, dtype=float), np.full(n, rate), np.full(n, div),
+        np.full(n, 0.2), np.full(n, t_years), otype_arr, np.asarray(prices))
+
+    analytic_fit = calibrate_heston(strikes, option_types, market_ivs, spot, t_years, rate, div,
+                                     use_analytic_jacobian=True)
+    fd_fit = calibrate_heston(strikes, option_types, market_ivs, spot, t_years, rate, div,
+                               use_analytic_jacobian=False)
+
+    for field in ("kappa", "theta", "xi", "rho", "v0"):
+        assert math.isclose(getattr(analytic_fit, field), getattr(fd_fit, field), abs_tol=1e-3,
+                             rel_tol=1e-3), field
+
+    analytic_rmse = heston_fit_rmse(analytic_fit, strikes, option_types, market_ivs, spot,
+                                     t_years, rate, div)
+    fd_rmse = heston_fit_rmse(fd_fit, strikes, option_types, market_ivs, spot, t_years, rate, div)
+    assert math.isclose(analytic_rmse, fd_rmse, abs_tol=1e-6, rel_tol=1e-2)
 
 
 def test_heston_calibration_recovers_a_known_smile():
