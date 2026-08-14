@@ -24,6 +24,18 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
   small (+7%) gap: the empirically-optimal band is ~2x wider than theory,
   statistically distinguishable from zero via stationary block bootstrap.
   See the README's "Research finding" section.
+- **`examples/gbm_control_experiment.py`**: control experiment isolating
+  the leading candidate mechanism (daily vs. WW's assumed continuous
+  monitoring) from real-market structure (fat tails, vol clustering) as
+  the cause of the above gap. Reruns the identical sweep/objective/
+  bootstrap methodology on simulated GBM paths (5 vol levels x 10 paths,
+  same 45-business-day cadence, hedge_vol = true simulation vol to
+  remove estimation noise as a confound). Finding: discretization alone
+  *does* produce a real, statistically significant widening (c*=4x
+  theory, +20% gap, bootstrap CI excludes zero) -- confirming it's a
+  genuine mechanism -- but overshoots the real-data magnitude (4x/+20%
+  vs. 2x/+7%), meaning real-market structure isn't simply additive on
+  top of a GBM baseline. Reported as an open question, not resolved.
 
 ### Added
 

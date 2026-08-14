@@ -46,6 +46,28 @@ band assumes.
 Run it yourself: `python examples/hedging_policy_frontier_study.py`
 (needs `POLYGON_API_KEY`, base equities tier only).
 
+**Follow-up control experiment** (`examples/gbm_control_experiment.py`, no
+API key needed): the "continuous vs. daily monitoring" mechanism above was
+plausible but untested -- it could equally have been fat tails or
+volatility clustering, real-market features GBM doesn't have. Rerunning
+the identical sweep (same objective, same bootstrap methodology) on
+simulated GBM paths at the same daily-rebalancing cadence, with hedge_vol
+set to the *true* simulation vol (removing vol-estimation noise as a
+further confound), isolates discretization specifically. Result: pure GBM
+with only daily monitoring **does** produce a real, statistically
+significant band-widening (`c*=4x` theory, `+20%` objective gap, bootstrap
+CI excludes zero) -- confirming discretization is a genuine, non-negligible
+mechanism, not a negligible technicality. But it **overshoots** the
+real-data result (`4x`/`+20%` vs. the real study's `2x`/`+7%`): pure
+discretization alone predicts *more* widening than real data actually
+shows, which rules out "discretization explains none of it" but also means
+real-market structure isn't simply adding extra widening on top of a GBM
+baseline -- something about real dynamics pulls the empirical optimum back
+*toward* theory relative to what discretization alone predicts. Open
+question, stated as such: genuine dynamical effect, or a scale mismatch
+between the control's vol/cost grid and the real study's actual realized
+vols.
+
 ## Layout
 
 ```
