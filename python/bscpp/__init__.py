@@ -29,6 +29,7 @@ from bscpp._core import (
     crr_price,
     heston_price,
     heston_price_batch,
+    heston_price_cos,
     heston_satisfies_feller_condition,
 )
 from bscpp.clock import Clock
@@ -69,6 +70,7 @@ __all__ = [
     "HestonParams",
     "heston_price",
     "heston_price_batch",
+    "heston_price_cos",
     "heston_satisfies_feller_condition",
     "make_inputs",
     "price",

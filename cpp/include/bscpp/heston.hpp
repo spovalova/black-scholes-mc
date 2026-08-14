@@ -80,6 +80,44 @@ public:
     // the model interpretation as "always-positive variance" no longer holds.
     static bool satisfies_feller_condition(const HestonParams& hp);
 
+    // Fang & Oosterlee (2008) COS method: a fixed-node Fourier-cosine
+    // series expansion, sharing the SAME characteristic function as
+    // price() (its j=2 branch is already the standard risk-neutral CF of
+    // ln(S_T), needing no separate re-derivation -- see the .cpp). This
+    // is what production Heston engines (including QuantLib's
+    // AnalyticHestonEngine) use for speed; benchmarks/test_heston_
+    // benchmark.py found price() (adaptive quadrature) ~13x slower than
+    // QuantLib specifically because of that fixed-vs-adaptive choice --
+    // this method closes nearly all of that gap (measured ~1.2x slower
+    // than QuantLib, see the README's "External benchmarks") without
+    // giving up price()'s self-terminating accuracy as the in-tree
+    // reference. Kept as a SEPARATE method, not a replacement: two
+    // independent ways to evaluate the same integral, cross-checked
+    // against each other (test_heston.py), matching this project's
+    // established pattern (HestonMCPricer vs. this class) of never
+    // trusting one Heston implementation alone.
+    //
+    // The truncation range [a,b] for x=ln(S_T) is derived from the first
+    // two cumulants of ln(S_T), computed NUMERICALLY via finite
+    // differences on the (already-trusted) characteristic function
+    // itself -- not a hand-derived closed-form cumulant formula, which
+    // would be a second, unverified place for a transcription error to
+    // hide. A SINGLE fixed (range, term-count) pair is not robust across
+    // this pricer's full parameter space, though (validated empirically,
+    // not assumed -- see the .cpp and CHANGELOG for what broke and why):
+    // instead this widens the range and term count together, iteration
+    // by iteration, until two successive estimates agree, and falls back
+    // to price() itself on the rare parameter combinations where that
+    // search doesn't converge within a bounded number of iterations --
+    // so the num_terms argument below is a starting point for that
+    // search, not the final resolution used. Verified to <0.1% relative
+    // error against price() across a 300-case random stress sweep
+    // spanning 1-day to 3-year maturities and well-behaved through badly
+    // Feller-violating vol-of-vol; see test_heston.py.
+    static double price_cos(double spot, double strike, double rate, double dividend_yield,
+                             double maturity, OptionType type, const HestonParams& hp,
+                             int num_terms = 160);
+
 private:
     static std::complex<double> char_function(std::complex<double> phi, double spot, double rate,
                                                 double dividend_yield, double maturity,

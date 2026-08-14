@@ -311,6 +311,62 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
   `calibrate_heston` now auto-selects resolution per calibration call.
   Net: 254ms -> 82ms (3.1x) on a 9-strike calibration, fitted parameters
   and RMSE unchanged (regression-tested).
+- **`heston_price_cos`**: Fang & Oosterlee (2008) COS-method pricer,
+  built specifically to close the ~13x single-price gap to QuantLib's
+  `AnalyticHestonEngine` published in the "External benchmarks" section
+  (the adaptive-quadrature `heston_price` is the right default for
+  correctness-first use; `heston_price_batch` above already closed this
+  gap for the batched-calibration case, not the cold single-price one).
+  Shares `char_function` with `heston_price` -- its `j=2` branch is
+  already the plain risk-neutral characteristic function of `ln(S_T)`,
+  needing no separate re-derivation.
+  - **Caught a real bug before trusting this, not after**: the first
+    draft copied Fang & Oosterlee's published payoff-coefficient formula
+    `K*(chi_k - psi_k)` verbatim, which assumes their paper's log-
+    moneyness convention `x = ln(S_T/K)`. This implementation uses
+    absolute log-price `x = ln(S_T)` (to match `char_function`), where
+    `K` multiplies only the `psi` (constant) term, not `chi` -- the
+    borrowed formula was silently wrong by construction. Caught by cross-
+    checking against a from-scratch, independent COS reimplementation
+    using the textbook Black-Scholes characteristic function (bypassing
+    Heston entirely, to isolate a COS-assembly bug from a Heston-CF bug)
+    before this method was ever exposed to Python: the first draft priced
+    a $10.45 BS call at $6,315 -- not a subtle drift, the unmistakable
+    kind of error a cross-check against a trusted reference catches
+    immediately and a "does it compile and return a number" smoke test
+    does not.
+  - **A single fixed truncation range is not robust across this pricer's
+    full parameter range**, found the same way: a fixed `[a,b]` domain
+    (from the characteristic function's numerically-estimated first two
+    cumulants) sized to survive `heston_price`'s own worst-case stress
+    tests (1-day maturity, Feller-violating vol-of-vol) still missed by
+    0.6% on that same case, and adding a numerically-estimated 4th
+    cumulant (the standard Fang-Oosterlee refinement for fat tails) made
+    it *worse* -- the finite-difference estimate is noisy enough at short
+    maturities to widen the domain when it shouldn't. Replaced both with
+    an adaptive scheme: widen the truncation range and term count
+    *together*, iteration by iteration, stopping when two successive
+    (unclamped -- see below) estimates agree, falling back to
+    `heston_price` itself if they never do within a bounded number of
+    iterations -- the same "self-terminating on measured error, not
+    assumed at a fixed truncation" philosophy `heston_price`'s own
+    adaptive quadrature already uses.
+  - **The convergence check itself had a false-positive trap**: a random
+    300-case stress sweep (maturities 1 day - 3 years, kappa/theta/xi/
+    rho/v0 spanning well-behaved to badly Feller-violating) found a
+    long-maturity, badly-Feller-violating case where two successive
+    iterations both landed on the no-arbitrage floor of exactly `0.0` by
+    coincidence (the true price was ~$0.80) -- comparing the *clamped*
+    price made that look like convergence. Fixed by comparing the raw,
+    unclamped sum across iterations instead, only applying the floor to
+    the final returned value.
+  - **Verified, not assumed**: <0.1% relative error against `heston_price`
+    across that same 300-case random sweep (0 mismatches, vs. 3 before the
+    fixes above) plus the existing hand-picked stress regimes
+    (`test_heston.py`); measured **1.19x** slower than QuantLib's
+    `AnalyticHestonEngine` (25.9us vs 21.7us, min-timed) on the
+    single-price case the 13x-slower benchmark measured, vs.
+    `heston_price`'s 13.5x (`benchmarks/test_heston_benchmark.py`).
 
 ### Fixed
 

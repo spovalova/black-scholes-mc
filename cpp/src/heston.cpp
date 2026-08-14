@@ -102,6 +102,29 @@ void fixed_simpson_grid(double a, double b, int n, std::vector<double>& nodes,
     }
 }
 
+// COS method (Fang & Oosterlee 2008) helpers.
+//
+// chi_k/psi_k are the standard cosine-series antiderivative coefficients
+// for the payoff function's exponential (chi) and constant (psi) pieces
+// over an integration range [c,d] within the truncation domain [a,b].
+// Textbook closed forms (e.g. Fang & Oosterlee 2008 eqs. 22-23) -- no
+// magic-number table, just trig/exp evaluated per k.
+double cos_chi(double k, double a, double b, double c, double d) {
+    const double u = k * kPi / (b - a);
+    const double u2p1 = 1.0 + u * u;
+    const double term_d = std::cos(u * (d - a)) * std::exp(d) + u * std::sin(u * (d - a)) * std::exp(d);
+    const double term_c = std::cos(u * (c - a)) * std::exp(c) + u * std::sin(u * (c - a)) * std::exp(c);
+    return (term_d - term_c) / u2p1;
+}
+
+double cos_psi(double k, double a, double b, double c, double d) {
+    if (k == 0.0) {
+        return d - c;
+    }
+    const double u = k * kPi / (b - a);
+    return (std::sin(u * (d - a)) - std::sin(u * (c - a))) / u;
+}
+
 }  // namespace
 
 std::complex<double> HestonPricer::char_function(std::complex<double> phi, double spot,
@@ -232,6 +255,136 @@ std::vector<double> HestonPricer::price_batch(double spot, const std::vector<dou
 
 bool HestonPricer::satisfies_feller_condition(const HestonParams& hp) {
     return 2.0 * hp.kappa * hp.theta >= hp.xi * hp.xi;
+}
+
+namespace {
+// One COS evaluation at a fixed (kL, num_terms) resolution -- returns the
+// UNCLAMPED (pre no-arbitrage-floor) price, since the floor can make two
+// genuinely-different-but-both-garbage estimates compare equal (both
+// clamped to exactly 0.0) and falsely look "converged" to the caller's
+// fixed-point iteration below.
+double price_cos_raw(double strike, double rate, double maturity, OptionType type,
+                      double c1, double c2, double kL, int num_terms,
+                      const std::function<std::complex<double>(double)>& cf_at) {
+    const cdouble i(0.0, 1.0);
+    const double std_dev = std::sqrt(std::max(c2, 0.0));
+    const double a = c1 - kL * std_dev;
+    const double b = c1 + kL * std_dev;
+
+    const double log_strike = std::log(strike);
+    if (type == OptionType::Call && log_strike >= b) return 0.0;
+    if (type == OptionType::Put && log_strike <= a) return 0.0;
+    const double c_lo = (type == OptionType::Call) ? std::max(log_strike, a) : a;
+    const double c_hi = (type == OptionType::Call) ? b : std::min(log_strike, b);
+
+    // Payoff coefficients V_k = integral of the payoff against the k-th
+    // cosine basis function over [c_lo,c_hi], scaled by 2/(b-a) to match
+    // the A_k normalization below. NOTE: since x here is the ABSOLUTE
+    // log-price ln(S_T) (not Fang & Oosterlee's log-moneyness x=ln(S_T/K)
+    // convention), the payoff is (e^x - K) for a call / (K - e^x) for a
+    // put -- so K multiplies only the psi (constant-term) integral, not
+    // the chi (e^x-term) integral. Using their paper's literal
+    // K*(chi-psi) formula here would silently assume the log-moneyness
+    // convention and be wrong by construction; this was caught by
+    // cross-checking against a from-scratch BS-COS reimplementation
+    // (same chi/psi, textbook BS characteristic function) before this
+    // method was trusted -- see test_heston.py.
+    double sum = 0.0;
+    for (int k = 0; k < num_terms; ++k) {
+        const double kd = static_cast<double>(k);
+        double v_k;
+        if (type == OptionType::Call) {
+            v_k = (2.0 / (b - a)) *
+                  (cos_chi(kd, a, b, c_lo, c_hi) - strike * cos_psi(kd, a, b, c_lo, c_hi));
+        } else {
+            v_k = (2.0 / (b - a)) *
+                  (strike * cos_psi(kd, a, b, c_lo, c_hi) - cos_chi(kd, a, b, c_lo, c_hi));
+        }
+        const double u = kd * kPi / (b - a);
+        const cdouble cf = cf_at(u);
+        const cdouble phase = std::exp(-i * u * a);
+        const double weight = (k == 0) ? 0.5 : 1.0;  // first term counted at half weight
+        sum += weight * (cf * phase).real() * v_k;
+    }
+    return std::exp(-rate * maturity) * sum;
+}
+}  // namespace
+
+double HestonPricer::price_cos(double spot, double strike, double rate, double dividend_yield,
+                                double maturity, OptionType type, const HestonParams& hp,
+                                int num_terms) {
+    // Cumulants of x=ln(S_T), estimated NUMERICALLY via finite differences
+    // on ln(char_function(..., j=2)) -- char_function's j=2 branch is
+    // already the standard risk-neutral CF of ln(S_T) (no separate
+    // re-derivation), so this reuses the same, already-verified formula
+    // price() itself is built on. ln(phi(u)) = iu*c1 - (u^2/2)*c2 +
+    // O(u^3) for small u, so c1 = -i*d/du[ln phi](0), c2 =
+    // -d^2/du^2[ln phi](0), both via central differences.
+    constexpr double h = 1e-4;
+    const auto log_cf = [&](double u) {
+        const cdouble phi(u, 0.0);
+        return std::log(char_function(phi, spot, rate, dividend_yield, maturity, hp, 2));
+    };
+    const cdouble l_plus = log_cf(h);
+    const cdouble l_minus = log_cf(-h);
+    const cdouble l_zero = log_cf(0.0);  // ~0 exactly; kept for the 2nd-difference formula's clarity
+    const cdouble i(0.0, 1.0);
+    const double c1 = (-i * (l_plus - l_minus) / (2.0 * h)).real();
+    const double c2 = (-(l_plus - 2.0 * l_zero + l_minus) / (h * h)).real();
+
+    const auto cf_at = [&](double u) {
+        return char_function(cdouble(u, 0.0), spot, rate, dividend_yield, maturity, hp, 2);
+    };
+
+    // A single fixed (kL, num_terms) choice is NOT robust across this
+    // pricer's full parameter range: a narrow-but-cheap domain undershoots
+    // for long maturities / badly Feller-violating vol-of-vol (fat-tailed
+    // ln(S_T)), while a domain wide enough for those cases wastes cycles
+    // -- and needs far more terms -- on the common (short/moderate
+    // maturity, well-behaved) case. So this widens the truncation range
+    // and term count together, iteration by iteration, and stops as soon
+    // as two successive estimates agree -- the same "self-terminating
+    // rather than assumed at a fixed truncation" philosophy price()
+    // already uses for its adaptive quadrature.
+    //
+    // Comparing against price(), not just num_terms, matters: holding kL
+    // fixed and only growing num_terms can converge cleanly to a value
+    // that's simply wrong, because the DOMAIN (not the resolution within
+    // it) was too narrow -- num_terms convergence alone can't detect
+    // that. Both must widen together, and the loop must be willing to
+    // fall back to the trusted (if slower) adaptive-quadrature price()
+    // rather than trust an estimate it never confirmed.
+    //
+    // Verified (test_heston.py) against price() across a 300-case random
+    // sweep spanning maturities from 1 day to 3 years, kappa/theta/xi/rho/v0
+    // covering both well-behaved and badly Feller-violating regimes, and
+    // strikes from deep ITM to deep OTM -- including a case where, without
+    // the price()-fallback below, two successive iterations both landed on
+    // the no-arbitrage floor of exactly 0.0 (a spurious "converged" false
+    // positive on genuinely divergent, not just imprecise, estimates) that
+    // masked a true price of ~0.8; see the raw (unclamped) comparison used
+    // below specifically to prevent that.
+    double kL = 10.0;
+    int terms = std::max(64, num_terms / 4);
+    double prev = price_cos_raw(strike, rate, maturity, type, c1, c2, kL, terms, cf_at);
+    constexpr int kMaxIters = 6;
+    for (int iter = 0; iter < kMaxIters; ++iter) {
+        kL += 4.0;
+        terms *= 2;
+        const double cur = price_cos_raw(strike, rate, maturity, type, c1, c2, kL, terms, cf_at);
+        const double tol = 1e-6 + 1e-5 * std::abs(cur);
+        if (std::abs(cur - prev) < tol) {
+            return std::max(cur, 0.0);  // same no-arbitrage floor as price()
+        }
+        prev = cur;
+    }
+    // Never converged to the required tolerance within the iteration
+    // budget -- rather than hand back an unconfirmed (possibly wildly
+    // wrong, per the case above) estimate, fall back to the trusted
+    // adaptive-quadrature price(). This only fires for the pathological
+    // tail of the parameter space (see test_heston.py); price_cos still
+    // returns its fast COS estimate for everything that converges.
+    return price(spot, strike, rate, dividend_yield, maturity, type, hp);
 }
 
 HestonMCPricer::HestonMCPricer(std::uint64_t seed) : seed_(seed) {}

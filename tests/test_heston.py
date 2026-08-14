@@ -152,6 +152,81 @@ def test_heston_price_batch_matches_single_price_across_stress_regimes():
             assert math.isclose(b, s, abs_tol=1e-4, rel_tol=1e-4), name
 
 
+def test_heston_price_cos_matches_adaptive_across_stress_regimes():
+    # heston_price_cos (Fang & Oosterlee 2008 COS method) shares the same
+    # char_function as heston_price but sums a fixed-node cosine series
+    # instead of adaptively quadrature-integrating -- see heston.hpp for
+    # why (closing the ~14x gap to QuantLib's AnalyticHestonEngine found
+    # in benchmarks/test_heston_benchmark.py). It exists purely to be a
+    # faster, cross-checked alternative to heston_price, so it's held to
+    # the same stress regimes heston_price itself was validated against:
+    # short maturity, badly Feller-violating vol-of-vol, and both together.
+    #
+    # An earlier draft of this method had a real bug caught only by this
+    # kind of cross-check: it copied Fang & Oosterlee's payoff-coefficient
+    # formula K*(chi_k-psi_k) verbatim, which assumes their paper's
+    # log-moneyness convention x=ln(S_T/K) -- but this implementation uses
+    # absolute log-price x=ln(S_T) (matching char_function), where K
+    # multiplies only the psi (constant) term, not chi. The bug produced
+    # prices off by 2-4 orders of magnitude, not a subtle drift, which is
+    # exactly the kind of error a cross-check against a trusted reference
+    # catches immediately and a "does it run" smoke test would not.
+    spot, rate, div = 100.0, 0.05, 0.0
+    regimes = [
+        ("normal ATM call", 1.0, 100.0, bscpp.OptionType.Call,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)),
+        ("normal OTM call", 1.0, 120.0, bscpp.OptionType.Call,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)),
+        ("normal put", 1.0, 100.0, bscpp.OptionType.Put,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)),
+        ("deep OTM put", 1.0, 60.0, bscpp.OptionType.Put,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)),
+        ("1-day maturity", 1 / 365, 100.0, bscpp.OptionType.Call,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.04)),
+        ("Feller-violating", 1.0, 100.0, bscpp.OptionType.Call,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=3.0, rho=-0.7, v0=0.04)),
+        ("worst case: 1-day + xi=3.0", 1 / 365, 100.0, bscpp.OptionType.Call,
+         bscpp.HestonParams(kappa=5.0, theta=0.04, xi=3.0, rho=-0.5, v0=0.04)),
+        ("5-year maturity", 5.0, 100.0, bscpp.OptionType.Call,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)),
+    ]
+    for name, maturity, strike, opt_type, hp in regimes:
+        adaptive = bscpp.heston_price(spot, strike, rate, div, maturity, opt_type, hp)
+        cos = bscpp.heston_price_cos(spot, strike, rate, div, maturity, opt_type, hp)
+        assert math.isclose(cos, adaptive, abs_tol=1e-3, rel_tol=1e-3), name
+
+
+def test_heston_price_cos_matches_adaptive_across_random_stress_sweep():
+    # A single hand-picked stress list can miss a parameter combination
+    # that breaks the adaptive truncation-range search inside
+    # heston_price_cos (this happened during development: a long-maturity,
+    # badly Feller-violating case made the domain-widening loop land on
+    # the no-arbitrage floor of 0.0 at two successive iterations by
+    # coincidence, which looked like convergence but wasn't -- see
+    # price_cos_raw in heston.cpp for why the fixed-point comparison uses
+    # the unclamped price). This sweeps a wide, fixed (seeded, reproducible)
+    # grid of maturities/params/strikes to catch that class of bug instead
+    # of relying on hand-picked cases alone.
+    rng = np.random.default_rng(1234)
+    spot, rate, div = 100.0, 0.04, 0.01
+    n = 60
+    for _ in range(n):
+        hp = bscpp.HestonParams(
+            kappa=rng.uniform(0.5, 5.0),
+            theta=rng.uniform(0.01, 0.1),
+            xi=rng.uniform(0.1, 3.0),
+            rho=rng.uniform(-0.9, 0.1),
+            v0=rng.uniform(0.01, 0.1),
+        )
+        maturity = rng.uniform(1 / 365, 3.0)
+        strike = rng.uniform(70, 140)
+        opt_type = bscpp.OptionType.Call if rng.random() < 0.5 else bscpp.OptionType.Put
+
+        adaptive = bscpp.heston_price(spot, strike, rate, div, maturity, opt_type, hp)
+        cos = bscpp.heston_price_cos(spot, strike, rate, div, maturity, opt_type, hp)
+        assert abs(cos - adaptive) < max(1e-3, 1e-2 * abs(adaptive)), (hp, maturity, strike, opt_type)
+
+
 def test_heston_matches_independent_monte_carlo():
     spot, strike, rate, div, maturity = 100.0, 100.0, 0.05, 0.0, 1.0
     hp = bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)

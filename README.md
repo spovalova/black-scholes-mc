@@ -415,6 +415,24 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   near-degenerate correlation.
 - `heston_satisfies_feller_condition`: checks `2*kappa*theta >= xi^2` as a
   diagnostic (many market-calibrated fits violate it in practice).
+- `heston_price_cos`: Fang & Oosterlee (2008) COS-method pricer -- a
+  fixed-node Fourier-cosine series sharing the same characteristic
+  function as `heston_price`, built specifically to close the ~13x gap to
+  QuantLib's `AnalyticHestonEngine` found in the benchmarks below (see
+  "External benchmarks"). Rather than a single fixed truncation range
+  (validated to fail on badly Feller-violating, long-maturity
+  parameters -- an early version was off by 2-4 orders of magnitude on a
+  formula bug caught only by cross-checking against `heston_price`, not
+  by "does it run"), it widens the truncation range and term count
+  together until two successive estimates agree, falling back to
+  `heston_price` itself on the rare combinations where that search
+  doesn't converge -- self-terminating on measured error, the same
+  philosophy `heston_price`'s own adaptive quadrature uses. Verified
+  against `heston_price` to <0.1% relative error across a 300-case random
+  stress sweep (maturities 1 day - 3 years, Feller-violating vol-of-vol
+  included); measured **1.19x** slower than QuantLib's
+  `AnalyticHestonEngine` (25.9us vs 21.7us, min-timed) vs. `heston_price`'s
+  13.5x -- see `benchmarks/test_heston_benchmark.py`.
 
 **Trading-desk Greeks** (`bscpp.trading_greeks`)
 - Converts calculus Greeks (vega/rho per 1.00 of vol/rate, theta per year)
@@ -510,23 +528,24 @@ an alternating +-1e-10 before each call to force real recomputation; see
 | BS price | 0.07us | 1.50us | 1.61us | **21x faster** |
 | BS implied vol | 0.12us | 4.79us | 7.59us | **39x faster** |
 | American (CRR, 500 steps) | 84.9us | 516.3us | -- | **6x faster** |
-| Heston price | 336.2us | 24.4us | -- | **14x SLOWER** |
+| Heston price (adaptive quadrature) | 324.7us | 24.5us | -- | **13x SLOWER** |
+| Heston price (COS method) | 29.8us | 24.5us | -- | **1.2x slower** |
 
-The Heston loss is real and already explained in the code, not a
-surprise found here: `heston.hpp` deliberately uses adaptive Simpson
-quadrature (self-terminating on measured error, no risk of a
+The adaptive-quadrature loss is real and already explained in the code,
+not a surprise found here: `heston_price` deliberately uses adaptive
+Simpson quadrature (self-terminating on measured error, no risk of a
 transcribed-table copying error) rather than the fixed-node quadrature
 table production engines like QuantLib's `AnalyticHestonEngine`
 typically use for speed. `heston_price_batch` (see CHANGELOG) already
-takes the fixed-node approach for the calibration hot path specifically,
+took the fixed-node approach for the calibration hot path specifically,
 where the same characteristic-function evaluations are shared across a
-whole strike grid -- this single-call, single-strike benchmark is
-exactly the case that optimization doesn't cover, so the gap shown here
-is the honest cost of the adaptive path a cold single-price call still
-pays in full. A fixed-node COS/FFT engine would likely close most of
-this gap for the single-price case too, at the cost of carrying a second
-Heston pricer to keep cross-checked against this one -- a real tradeoff,
-not yet made.
+whole strike grid; `heston_price_cos` (Fang & Oosterlee 2008 COS method,
+see above) closes nearly all of the remaining single-price gap the same
+way QuantLib does -- a second, independently cross-checked Heston pricer
+now exists specifically so that speed didn't have to come at the cost of
+the adaptive pricer's self-terminating-on-measured-error guarantee for
+everyone; `heston_price` stays the trusted reference, `heston_price_cos`
+is opt-in and falls back to it when its own convergence check fails.
 
 Run it yourself: `pip install -e ".[benchmark]"` then
 `pytest benchmarks/ --benchmark-only --benchmark-columns=min,mean,stddev,median,rounds`.

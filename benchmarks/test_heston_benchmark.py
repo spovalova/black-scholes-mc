@@ -55,3 +55,22 @@ def test_heston_price_bscpp(benchmark):
 def test_heston_price_quantlib(benchmark, ql_heston_option):
     option, spot_quote = ql_heston_option
     benchmark(ql_force_recompute(option, spot_quote, S))
+
+
+def test_heston_price_cos_correctness(ql_heston_option):
+    option, _ = ql_heston_option
+    hp = bscpp.HestonParams(kappa=KAPPA, theta=THETA, xi=XI, rho=RHO, v0=V0)
+    cos_price = bscpp.heston_price_cos(S, K, RATE, DIV, T, bscpp.OptionType.Call, hp)
+    ql_price = option.NPV()
+    assert math.isclose(cos_price, ql_price, rel_tol=1e-4)
+
+
+def test_heston_price_cos_bscpp(benchmark):
+    # This is the pricer heston_price_bscpp above was benchmarked against
+    # closing the gap to -- see heston.hpp for why (fixed-node COS series,
+    # sharing char_function with heston_price, vs. heston_price's adaptive
+    # quadrature). Cross-checked for correctness (not just speed) against
+    # both QuantLib above and heston_price itself across a wide stress
+    # sweep in tests/test_heston.py before being trusted here.
+    hp = bscpp.HestonParams(kappa=KAPPA, theta=THETA, xi=XI, rho=RHO, v0=V0)
+    benchmark(bscpp.heston_price_cos, S, K, RATE, DIV, T, bscpp.OptionType.Call, hp)
