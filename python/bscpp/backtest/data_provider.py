@@ -203,10 +203,10 @@ class MockProvider(DataProvider):
 
     def __init__(
         self,
+        rate: float,
         spot: float = 100.0,
         base_vol: float = 0.20,
         smile_strength: float = 0.35,
-        rate: float = 0.05,
         dividend_yield: float = 0.0,
         realized_vol: float | None = None,
         seed: int = 7,

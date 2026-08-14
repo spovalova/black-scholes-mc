@@ -62,6 +62,22 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
 
 ### Added
 
+- **`bscpp.curve.ZeroCurve`**: minimal piecewise-flat zero-rate curve
+  (`df(t)`, `zero_rate(t)`, `forward_rate(t1, t2)`) plus `resolve_rate`,
+  threaded through `StripPricer`, `HedgingBacktester` (both option pricing
+  and the cash leg's financing accrual, resolved at the option's own
+  remaining maturity at each step -- see `attribute_pnl`'s matching fix
+  so the exact P&L-decomposition identity still holds under a real curve,
+  not just a flat rate), and `calibrate_heston`/`calibrate_heston_with_
+  stability`/`heston_fit_rmse`. `rate` is no longer defaulted anywhere in
+  that chain -- `StripPricer.rate`, `MockProvider.rate`, and
+  `realized_vs_implied_experiment`'s `rate` all became required
+  parameters (previously `=0.05`); `HedgingBacktester.rate` and
+  `calibrate_heston`'s `rate` were already required. Every caller
+  (7 call sites) updated to pass a rate explicitly. 9 new tests
+  (`test_curve.py`); full suite unaffected in the flat-rate case (`resolve
+  _rate` is behavior-preserving there), demonstrated with a genuine
+  3-pillar curve end-to-end in `real_data_hedging_demo.py`.
 - **`bscpp.backtest.policies`** -- the rebalancing-policy ladder from the
   transaction-cost literature: `DeltaPolicy` (rebalance to exact delta,
   the baseline), `BandPolicy` (fixed no-trade band, trade to the nearest

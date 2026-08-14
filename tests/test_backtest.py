@@ -4,7 +4,7 @@ from bscpp.backtest import Backtester, MockProvider, StripPricer
 
 
 def test_mock_provider_chain_shape():
-    provider = MockProvider(spot=100.0, base_vol=0.22)
+    provider = MockProvider(rate=0.05, spot=100.0, base_vol=0.22)
     expiration = dt.date.today() + dt.timedelta(days=45)
     chain = provider.get_option_chain("TEST", expiration)
     assert not chain.empty
@@ -13,7 +13,7 @@ def test_mock_provider_chain_shape():
 
 
 def test_strip_pricer_prices_mock_chain():
-    provider = MockProvider(spot=100.0, base_vol=0.22)
+    provider = MockProvider(rate=0.05, spot=100.0, base_vol=0.22)
     pricer = StripPricer(provider, rate=0.05, mc_paths=20_000)
     expiration = dt.date.today() + dt.timedelta(days=45)
 
@@ -30,7 +30,7 @@ def test_strip_pricer_prices_mock_chain():
 
 
 def test_backtester_run_and_summary():
-    provider = MockProvider(spot=100.0, base_vol=0.22)
+    provider = MockProvider(rate=0.05, spot=100.0, base_vol=0.22)
     pricer = StripPricer(provider, rate=0.05, mc_paths=5_000)
     expiration = dt.date.today() + dt.timedelta(days=45)
     backtester = Backtester(pricer)
@@ -50,7 +50,7 @@ def test_strip_pricer_flags_iv_source_and_never_invents_ivs():
     # flag -- contaminating every downstream consumer with fake IVs. Now
     # every row carries iv_source in {"quoted", "solved", "fallback"} and
     # fallback rows have NaN model_iv and NaN pricing outputs.
-    provider = MockProvider(spot=100.0, base_vol=0.22)
+    provider = MockProvider(rate=0.05, spot=100.0, base_vol=0.22)
     pricer = StripPricer(provider, rate=0.05, mc_paths=1)
     expiration = dt.date.today() + dt.timedelta(days=45)
 

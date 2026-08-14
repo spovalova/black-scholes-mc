@@ -6,6 +6,7 @@ demos like run_backtest.py without --mock DO require an options-capable
 plan; this one doesn't.)
 
     python examples/real_data_hedging_demo.py --ticker AAPL --hedge-vol 0.30
+    python examples/real_data_hedging_demo.py --ticker AAPL --rate 0.045   # flat override
 """
 
 import argparse
@@ -14,6 +15,14 @@ import datetime as dt
 from dotenv import load_dotenv
 
 from bscpp.backtest import HedgingBacktester, PolygonProvider
+from bscpp.curve import ZeroCurve
+
+# Illustrative only -- NOT bootstrapped from real market instruments (see
+# the README's scope statement). Demonstrates that HedgingBacktester takes
+# a genuine term structure, not just a single hardcoded number: the
+# option's own remaining maturity picks the rate, both for pricing it and
+# for the cash leg's financing accrual (see HedgingBacktester.__init__).
+_DEFAULT_CURVE = ZeroCurve(tenors=(30 / 365, 1.0, 5.0), rates=(0.048, 0.045, 0.042))
 
 
 def parse_args():
@@ -22,7 +31,9 @@ def parse_args():
     p.add_argument("--lookback-days", type=int, default=60)
     p.add_argument("--hedge-vol", type=float, default=0.30,
                     help="constant vol used to compute BS deltas each day")
-    p.add_argument("--rate", type=float, default=0.05)
+    p.add_argument("--rate", type=float, default=None,
+                    help="flat rate override; omit to use the illustrative default curve "
+                         "(see _DEFAULT_CURVE)")
     p.add_argument("--option-type", choices=["call", "put"], default="call")
     p.add_argument("--transaction-cost-bps", type=float, default=5.0,
                     help="cost of crossing the spread on each rebalance, in bps of trade notional")
@@ -44,11 +55,14 @@ def main():
     strike = round(spot0 / 5) * 5  # nearest $5 strike, roughly ATM at inception
     expiration = history.index[-1].date()
 
+    rate = ZeroCurve.flat(args.rate) if args.rate is not None else _DEFAULT_CURVE
+    rate_desc = (f"flat {args.rate:.3%}" if args.rate is not None else
+                 f"curve {list(zip(rate.tenors, rate.rates))}")
     print(f"{args.ticker}: {len(history)} closes, {history.index[0].date()} -> {expiration}")
     print(f"Spot at inception: {spot0:.2f}, strike: {strike}, hedge_vol: {args.hedge_vol}, "
-          f"transaction_cost_bps: {args.transaction_cost_bps}\n")
+          f"rate: {rate_desc}, transaction_cost_bps: {args.transaction_cost_bps}\n")
 
-    backtester = HedgingBacktester(rate=args.rate, transaction_cost_bps=args.transaction_cost_bps)
+    backtester = HedgingBacktester(rate=rate, transaction_cost_bps=args.transaction_cost_bps)
     result = backtester.run(history, strike=strike, expiration=expiration,
                              hedge_vol=args.hedge_vol, option_type=args.option_type)
 

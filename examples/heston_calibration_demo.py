@@ -22,7 +22,7 @@ from bscpp.backtest import (
 
 def main():
     spot, rate = 450.0, 0.05
-    provider = MockProvider(spot=spot, base_vol=0.18, smile_strength=0.40)
+    provider = MockProvider(rate=0.05, spot=spot, base_vol=0.18, smile_strength=0.40)
     pricer = StripPricer(provider, rate=rate, mc_paths=1)
     expiration = dt.date.today() + dt.timedelta(days=45)
 

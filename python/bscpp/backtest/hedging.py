@@ -32,6 +32,7 @@ import pandas as pd
 
 import bscpp
 from bscpp.backtest.policies import DeltaPolicy, HedgeState
+from bscpp.curve import resolve_rate
 
 
 class HedgingBacktester:
@@ -48,7 +49,15 @@ class HedgingBacktester:
     single-name equity; illiquid names or wide markets would need more.
     """
 
-    def __init__(self, rate: float, dividend_yield: float = 0.0, transaction_cost_bps: float = 0.0):
+    def __init__(self, rate, dividend_yield: float = 0.0, transaction_cost_bps: float = 0.0):
+        """rate: a bare float (flat rate) or a bscpp.ZeroCurve. Resolved to
+        the scalar rate at the option's OWN remaining maturity at each
+        step (via bscpp.curve.resolve_rate) -- both for pricing the
+        option and for the cash leg's financing accrual over that step.
+        Using the option-maturity rate for financing too is a deliberate
+        simplification (a real desk separates repo/overnight financing
+        from the option's own discount rate); a genuine short-end curve
+        is out of scope here, see the README's scope statement."""
         self.rate = rate
         self.dividend_yield = dividend_yield
         self.transaction_cost_bps = transaction_cost_bps
@@ -105,13 +114,14 @@ class HedgingBacktester:
         spot0 = float(price_path.iloc[0])
         vol0 = float(vols.iloc[0])
         t0 = max((expiration - dates[0].date()).days, 1) / 365.0
-        inputs0 = bscpp.make_inputs(spot0, strike, self.rate, vol0, t0, option_type,
+        rate0 = resolve_rate(self.rate, t0)
+        inputs0 = bscpp.make_inputs(spot0, strike, rate0, vol0, t0, option_type,
                                      self.dividend_yield)
         result0 = bscpp.bs_price_with_greeks(inputs0)
 
         state0 = HedgeState(t=t0, spot=spot0, delta=result0.greeks.delta,
                             gamma=result0.greeks.gamma, vega=result0.greeks.vega,
-                            rate=self.rate, cost_frac=cost_frac)
+                            rate=rate0, cost_frac=cost_frac)
         shares = policy.target_shares(0.0, state0)
         cost0 = abs(shares) * spot0 * cost_frac  # crossing the spread to establish the hedge
         cash = result0.price - shares * spot0 - cost0
@@ -132,7 +142,13 @@ class HedgingBacktester:
             vol = float(vols.iloc[i])
             elapsed_days = (dates[i] - dates[i - 1]).days or 1
             dt_years = elapsed_days / 365.0
-            cash *= math.exp(self.rate * dt_years)
+            t = max((expiration - date.date()).days, 0) / 365.0
+            # Financing accrues over this step at the rate for the OPTION'S
+            # remaining maturity as of this step (not a separate overnight/
+            # repo rate -- see __init__'s docstring for why that's a
+            # deliberate simplification, not an oversight).
+            rate = resolve_rate(self.rate, t if t > 0.0 else t0)
+            cash *= math.exp(rate * dt_years)
             # Dividend income on the stock leg carried into this interval
             # (held at `shares` since the last rebalance). Without this,
             # the hedge is inconsistent with using dividend_yield-adjusted
@@ -141,7 +157,6 @@ class HedgingBacktester:
             cash += shares * spot_prev * (math.exp(self.dividend_yield * dt_years) - 1.0)
             spot_prev = spot
 
-            t = max((expiration - date.date()).days, 0) / 365.0
             if t <= 0.0:
                 payoff = max(spot - strike, 0.0) if option_type == "call" else max(strike - spot, 0.0)
                 cost = abs(shares) * spot * cost_frac  # crossing the spread to unwind the hedge
@@ -150,14 +165,14 @@ class HedgingBacktester:
                 delta, gamma, theta, vega = 0.0, 0.0, 0.0, 0.0  # degenerate at expiry
                 vol = float(vols.iloc[i - 1])  # no re-mark at expiry: payoff has no vol
             else:
-                inputs = bscpp.make_inputs(spot, strike, self.rate, vol, t, option_type,
+                inputs = bscpp.make_inputs(spot, strike, rate, vol, t, option_type,
                                             self.dividend_yield)
                 result = bscpp.bs_price_with_greeks(inputs)
                 option_value = result.price
                 delta, gamma = result.greeks.delta, result.greeks.gamma
                 theta, vega = result.greeks.theta, result.greeks.vega
                 state = HedgeState(t=t, spot=spot, delta=delta, gamma=gamma, vega=vega,
-                                   rate=self.rate, cost_frac=cost_frac)
+                                   rate=rate, cost_frac=cost_frac)
                 new_shares = policy.target_shares(shares, state)
                 cost = abs(new_shares - shares) * spot * cost_frac  # crossing the spread
                 cash -= (new_shares - shares) * spot + cost  # trade the change, pay the spread
@@ -248,7 +263,12 @@ class HedgingBacktester:
             elapsed_days = (df["date"].iat[i] - df["date"].iat[i - 1]).days or 1
             dt_years = elapsed_days / 365.0
             realized[i] = df["portfolio_value"].iat[i] - df["portfolio_value"].iat[i - 1]
-            financing[i] = df["cash"].iat[i - 1] * (math.exp(self.rate * dt_years) - 1.0)
+            # Same rate resolution as run(): the option's own remaining
+            # maturity as of the END of this step (falling back to the
+            # step's starting maturity at expiry, where remaining T=0).
+            t_i = df["T"].iat[i]
+            step_rate = resolve_rate(self.rate, t_i if t_i > 0.0 else df["T"].iat[i - 1])
+            financing[i] = df["cash"].iat[i - 1] * (math.exp(step_rate * dt_years) - 1.0)
             d_spot = df["spot"].iat[i] - df["spot"].iat[i - 1]
             gamma_pnl[i] = -0.5 * df["gamma"].iat[i - 1] * d_spot ** 2
             theta_pnl[i] = -df["theta"].iat[i - 1] * dt_years
@@ -276,9 +296,9 @@ class HedgingBacktester:
 def realized_vs_implied_experiment(
     hedge_vol: float,
     realized_vols: list[float],
+    rate,
     spot: float = 100.0,
     strike: float = 100.0,
-    rate: float = 0.05,
     t_days: int = 60,
     option_type: str = "call",
     n_paths_per_vol: int = 200,
@@ -306,13 +326,14 @@ def realized_vs_implied_experiment(
     dates = pd.date_range(anchor, periods=t_days + 1, freq="D")
     expiration = dates[-1].date()
     dt_frac = 1.0 / 365.0
+    sim_rate = resolve_rate(rate, t_days / 365.0)  # scalar drift for the simulated GBM path
 
     rows = []
     for rv in realized_vols:
         pnls = []
         for _ in range(n_paths_per_vol):
             z = rng.normal(size=t_days)
-            log_ret = (rate - 0.5 * rv**2) * dt_frac + rv * math.sqrt(dt_frac) * z
+            log_ret = (sim_rate - 0.5 * rv**2) * dt_frac + rv * math.sqrt(dt_frac) * z
             path = spot * np.exp(np.concatenate([[0.0], np.cumsum(log_ret)]))
             series = pd.Series(path, index=dates)
 

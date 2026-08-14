@@ -221,7 +221,7 @@ def test_heston_calibration_recovers_a_known_smile():
 
 def _short_dated_mock_chain():
     spot, rate = 450.0, 0.05
-    provider = MockProvider(spot=spot, base_vol=0.18, smile_strength=0.40)
+    provider = MockProvider(rate=0.05, spot=spot, base_vol=0.18, smile_strength=0.40)
     pricer = StripPricer(provider, rate=rate, mc_paths=1)
     expiration = dt.date.today() + dt.timedelta(days=45)
     chain = pricer.price_strip("SPY", expiration, strike_range=(0.85, 1.15), use_mc=False)

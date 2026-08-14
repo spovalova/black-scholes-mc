@@ -11,6 +11,7 @@ import pandas as pd
 
 import bscpp
 from bscpp.backtest.data_provider import DataProvider
+from bscpp.curve import resolve_rate
 
 
 def _time_to_expiry_years(expiration: dt.date, as_of: dt.date) -> float:
@@ -23,11 +24,15 @@ class StripPricer:
     def __init__(
         self,
         provider: DataProvider,
-        rate: float = 0.05,
+        rate,
         dividend_yield: float = 0.0,
         mc_paths: int = 50_000,
         mc_seed: int = 42,
     ):
+        """rate: a bare float (flat rate) or a bscpp.ZeroCurve -- resolved
+        to the scalar rate at this chain's own maturity in price_strip.
+        No default: a hardcoded rate is exactly the kind of assumption
+        that shouldn't be silently inherited by every caller."""
         self.provider = provider
         self.rate = rate
         self.dividend_yield = dividend_yield
@@ -62,6 +67,7 @@ class StripPricer:
         t_years = _time_to_expiry_years(expiration, as_of)
         if t_years <= 0:
             raise ValueError(f"expiration {expiration} is not after as_of {as_of}")
+        rate = resolve_rate(self.rate, t_years)
 
         chain["mid"] = chain[["bid", "ask"]].mean(axis=1)
         chain["mid"] = chain["mid"].fillna(chain["last"])
@@ -90,7 +96,7 @@ class StripPricer:
         if solve_mask.any():
             idx = np.flatnonzero(solve_mask)
             seed_inputs = [
-                bscpp.make_inputs(spot, chain["strike"].iat[i], self.rate, 0.20, t_years,
+                bscpp.make_inputs(spot, chain["strike"].iat[i], rate, 0.20, t_years,
                                    otypes[i], self.dividend_yield)
                 for i in idx
             ]
@@ -109,7 +115,7 @@ class StripPricer:
         priceable = model_ivs == model_ivs  # not-NaN mask
         safe_ivs = np.where(priceable, model_ivs, 0.20)
         inputs_list = [
-            bscpp.make_inputs(spot, chain["strike"].iat[i], self.rate, safe_ivs[i], t_years,
+            bscpp.make_inputs(spot, chain["strike"].iat[i], rate, safe_ivs[i], t_years,
                                otypes[i], self.dividend_yield)
             for i in range(len(chain))
         ]

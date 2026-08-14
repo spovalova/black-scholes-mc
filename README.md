@@ -155,6 +155,20 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   against the paper's own benchmark (S=36, K=40, r=6%, vol=20%, T=1y ->
   ~4.47-4.48) and the no-early-exercise identity for dividend-free calls.
 
+**Rate curve** (`bscpp.curve.ZeroCurve`)
+- Minimal piecewise-flat, continuously-compounded zero-rate curve --
+  `df(t)`, `zero_rate(t)`, `forward_rate(t1, t2)` -- not a curve-
+  bootstrapping engine (building one from real market instruments is a
+  materially larger, different undertaking, out of scope here; see the
+  scope statement below). `StripPricer`, `HedgingBacktester`, and
+  `calibrate_heston` all accept either a bare float (a flat rate) or a
+  `ZeroCurve` via `resolve_rate`, resolved to the maturity-appropriate
+  scalar the underlying single-rate C++ pricers actually need. None of
+  the three defaults `rate` anymore -- a hardcoded 0.05 is exactly the
+  kind of assumption that shouldn't be silently inherited by every
+  caller. See `examples/real_data_hedging_demo.py` for an end-to-end
+  multi-pillar curve, not just a unit test of the class in isolation.
+
 **Multi-leg strategies** (`bscpp.strategies`)
 - `straddle`, `strangle`, `vertical_spread`, `butterfly`, `strip` (long 1
   call + 2 puts, bearish-biased), `strap` (long 2 calls + 1 put,

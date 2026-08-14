@@ -38,7 +38,7 @@ def main():
     args = parse_args()
 
     if args.mock:
-        provider = MockProvider(spot=450.0, base_vol=0.18)
+        provider = MockProvider(rate=0.05, spot=450.0, base_vol=0.18)
     else:
         provider = PolygonProvider()  # reads POLYGON_API_KEY from env
 

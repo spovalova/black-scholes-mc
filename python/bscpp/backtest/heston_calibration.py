@@ -22,6 +22,7 @@ import numpy as np
 from scipy.optimize import least_squares
 
 import bscpp
+from bscpp.curve import resolve_rate
 
 # kappa, theta, xi, rho, v0
 _LOWER_BOUNDS = [1e-3, 1e-4, 1e-3, -0.999, 1e-4]
@@ -131,6 +132,7 @@ def calibrate_heston(
     if strikes.size < 6:
         raise ValueError("need at least 6 valid (strike, iv) points to calibrate Heston")
 
+    rate = resolve_rate(rate, t_years)  # a single expiry -> one scalar rate for the whole fit
     atm_var = float(np.median(market_ivs)) ** 2
     kappa_prior = 2.0
 
@@ -238,6 +240,7 @@ def heston_fit_rmse(
     strikes, market_ivs = strikes[valid], market_ivs[valid]
     option_types = [t for t, v in zip(option_types, valid) if v]
 
+    rate = resolve_rate(rate, t_years)
     fitted_ivs = _heston_implied_vols(
         [params.kappa, params.theta, params.xi, params.rho, params.v0],
         strikes, option_types, spot, t_years, rate, dividend_yield,
