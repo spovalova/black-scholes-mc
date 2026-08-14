@@ -218,6 +218,44 @@ public:
                    double maturity, OptionType type, const HestonParams& hp, long num_paths,
                    int num_steps);
 
+    // Andersen (2008) "QE" (Quadratic-Exponential) scheme -- a SEPARATE
+    // method, not a replacement for price() above, matching this
+    // project's established pattern (HestonPricer::price vs. price_cos)
+    // of adding a cross-checked alternative rather than swapping the
+    // trusted implementation out from under existing callers.
+    //
+    // price()'s full-truncation Euler scheme floors v at 0 wherever it
+    // appears -- a crude approximation exactly when the Feller condition
+    // is badly violated (v keeps hitting its floor between steps), which
+    // is why price() above needs ~3000 steps to get within 1 standard
+    // error of the analytic price at xi=3.0 against 2*kappa*theta=0.16
+    // (300 steps disagrees by ~40 std errors -- see price()'s own
+    // docs/test_heston.py). QE instead samples v(t+dt) | v(t) from a
+    // distribution MOMENT-MATCHED to the true (non-central chi-squared)
+    // conditional law of the CIR process -- either a squared-Gaussian
+    // ("Quadratic" branch, small local variance-to-mean ratio psi) or an
+    // exponential-tailed inverse-CDF draw ("Exponential" branch, large
+    // psi, which is where full-truncation Euler's bias comes from) -- so
+    // v(t+dt) is exactly non-negative by construction, not truncated, and
+    // the discretization error no longer blows up as psi grows.
+    //
+    // The log-price step uses Andersen's standard (not martingale-
+    // corrected) K0..K4 drift/diffusion decomposition with gamma1=
+    // gamma2=0.5 (the "central" discretization) -- the martingale-
+    // corrected variant exists in the paper specifically to remove a
+    // residual E[S_T] bias at LARGE dt/few steps; measured here (see
+    // test_heston.py) to be small enough at the step counts this method
+    // is actually used at that the extra complexity (and a second place
+    // for a sign/algebra transcription error to hide) wasn't justified --
+    // a disclosed simplification, not an unexamined one.
+    //
+    // Verified (test_heston.py) against the SAME Feller-violating stress
+    // case price() documents above, at a small fraction of the step count
+    // price()'s Euler scheme needed to reach comparable accuracy.
+    MCResult price_qe(double spot, double strike, double rate, double dividend_yield,
+                       double maturity, OptionType type, const HestonParams& hp, long num_paths,
+                       int num_steps);
+
 private:
     // See MonteCarloPricer/AmericanPricer: path generation constructs a
     // fresh LOCAL Philox4x64 per path (seeked to a disjoint counter

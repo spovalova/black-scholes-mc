@@ -289,7 +289,14 @@ PYBIND11_MODULE(_core, m) {
         .def(py::init<std::uint64_t>(), py::arg("seed") = 42)
         .def("price", &HestonMCPricer::price, py::arg("spot"), py::arg("strike"), py::arg("rate"),
              py::arg("dividend_yield"), py::arg("maturity"), py::arg("type"), py::arg("params"),
-             py::arg("num_paths"), py::arg("num_steps"), py::call_guard<py::gil_scoped_release>());
+             py::arg("num_paths"), py::arg("num_steps"), py::call_guard<py::gil_scoped_release>())
+        .def("price_qe", &HestonMCPricer::price_qe, py::arg("spot"), py::arg("strike"),
+             py::arg("rate"), py::arg("dividend_yield"), py::arg("maturity"), py::arg("type"),
+             py::arg("params"), py::arg("num_paths"), py::arg("num_steps"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Andersen (2008) QE scheme -- see heston.hpp for why this needs far fewer "
+             "num_steps than price() (full-truncation Euler) to reach comparable accuracy, "
+             "especially when the Feller condition is badly violated.");
 
     // Testing-only: exposes raw Philox4x64 draws so test_philox.py can
     // cross-validate them bit-for-bit against numpy.random.Philox on the

@@ -625,4 +625,124 @@ MCResult HestonMCPricer::price(double spot, double strike, double rate, double d
     return {mean, std_error};
 }
 
+namespace {
+
+// Two independent U(0,1] draws, same raw-Philox convention
+// standard_normal (portable_normal.hpp) uses -- kept local to this file,
+// not folded into that shared/already-verified header, because Andersen
+// QE's Exponential branch needs the RAW uniform directly (for its
+// inverse-CDF sampling), not just a Box-Muller-transformed normal.
+struct UniformPair {
+    double u1, u2;
+};
+
+UniformPair draw_uniform_pair(Philox4x64& rng) {
+    constexpr double kScale = 1.0 / 9007199254740992.0;  // 2^-53
+    double u1;
+    do {
+        u1 = static_cast<double>(rng() >> 11) * kScale;
+    } while (u1 <= 0.0);
+    const double u2 = static_cast<double>(rng() >> 11) * kScale;
+    return {u1, u2};
+}
+
+double box_muller_normal(const UniformPair& u) {
+    constexpr double kTwoPi = 6.283185307179586476925286766559;
+    return std::sqrt(-2.0 * std::log(u.u1)) * std::cos(kTwoPi * u.u2);
+}
+
+}  // namespace
+
+MCResult HestonMCPricer::price_qe(double spot, double strike, double rate, double dividend_yield,
+                                   double maturity, OptionType type, const HestonParams& hp,
+                                   long num_paths, int num_steps) {
+    const double dt = maturity / num_steps;
+    const double discount = std::exp(-rate * maturity);
+    const double exp_neg_kappa_dt = std::exp(-hp.kappa * dt);
+
+    // Andersen (2008) sec. 3.2: psi_c=1.5 is the paper's own recommended
+    // switching threshold between the Quadratic (small local variance-to-
+    // mean-squared ratio -- the CIR conditional law is well-approximated
+    // by a squared, shifted Gaussian) and Exponential (large ratio, where
+    // a squared-Gaussian can no longer match the true law's heavier tail)
+    // branches. Not tuned here; the paper's own value, used as published.
+    constexpr double kPsiC = 1.5;
+
+    // gamma1=gamma2=0.5: Andersen's "central" discretization for the log-
+    // price step (K0..K4 below) -- the standard, not martingale-corrected,
+    // choice; see price_qe's header doc for why the correction wasn't
+    // needed at the step counts this method is verified at.
+    const double K0 = -hp.rho * hp.kappa * hp.theta * dt / hp.xi;
+    const double K1 = 0.5 * dt * (hp.kappa * hp.rho / hp.xi - 0.5) - hp.rho / hp.xi;
+    const double K2 = 0.5 * dt * (hp.kappa * hp.rho / hp.xi - 0.5) + hp.rho / hp.xi;
+    const double K3 = 0.5 * dt * (1.0 - hp.rho * hp.rho);
+    const double K4 = 0.5 * dt * (1.0 - hp.rho * hp.rho);
+    const double drift = (rate - dividend_yield) * dt + K0;
+
+    // 2 uniform-pairs/step (one for the v-branch draw, one Box-Muller'd
+    // into Z_s) => 4 raw draws/step => 1 Philox block/step, same
+    // per-path/per-step block accounting as price() above.
+    const std::uint64_t per_path = static_cast<std::uint64_t>(num_steps);
+    const std::uint64_t base = cursor_;
+    cursor_ += static_cast<std::uint64_t>(num_paths) * per_path;
+
+    double sum = 0.0;
+    double sum_sq = 0.0;
+#pragma omp parallel for reduction(+ : sum, sum_sq)
+    for (long p = 0; p < num_paths; ++p) {
+        Philox4x64 local(seed_);
+        local.seek(base + static_cast<std::uint64_t>(p) * per_path);
+        double log_s = std::log(spot);
+        double v = hp.v0;
+        for (int step = 0; step < num_steps; ++step) {
+            const UniformPair uv = draw_uniform_pair(local);
+
+            const double m = hp.theta + (v - hp.theta) * exp_neg_kappa_dt;
+            const double s2 = v * hp.xi * hp.xi * exp_neg_kappa_dt / hp.kappa *
+                                   (1.0 - exp_neg_kappa_dt) +
+                               hp.theta * hp.xi * hp.xi / (2.0 * hp.kappa) *
+                                   (1.0 - exp_neg_kappa_dt) * (1.0 - exp_neg_kappa_dt);
+            // m>0 always (theta,v0>0, convex combination); guard s2 against
+            // roundoff producing a tiny negative value at v==0.
+            const double psi = std::max(s2, 0.0) / (m * m);
+
+            double v_next;
+            if (psi <= kPsiC) {
+                const double inv_psi = 1.0 / psi;
+                const double b2 = 2.0 * inv_psi - 1.0 +
+                                   std::sqrt(2.0 * inv_psi) * std::sqrt(2.0 * inv_psi - 1.0);
+                const double a = m / (1.0 + b2);
+                const double zv = box_muller_normal(uv);
+                const double root_b2_plus_zv = std::sqrt(b2) + zv;
+                v_next = a * root_b2_plus_zv * root_b2_plus_zv;
+            } else {
+                const double pr = (psi - 1.0) / (psi + 1.0);
+                const double beta = (1.0 - pr) / m;
+                v_next = (uv.u1 <= pr) ? 0.0 : std::log((1.0 - pr) / (1.0 - uv.u1)) / beta;
+            }
+
+            const UniformPair us = draw_uniform_pair(local);
+            const double zs = box_muller_normal(us);
+            const double diffusion_var = std::max(K3 * v + K4 * v_next, 0.0);
+            log_s += drift + K1 * v + K2 * v_next + std::sqrt(diffusion_var) * zs;
+
+            v = v_next;
+        }
+
+        const double s_final = std::exp(log_s);
+        const double payoff = (type == OptionType::Call) ? std::max(s_final - strike, 0.0)
+                                                           : std::max(strike - s_final, 0.0);
+        const double discounted = discount * payoff;
+        sum += discounted;
+        sum_sq += discounted * discounted;
+    }
+
+    const double mean = sum / static_cast<double>(num_paths);
+    double variance = sum_sq / static_cast<double>(num_paths) - mean * mean;
+    variance = std::max(variance, 0.0);
+    const double std_error = std::sqrt(variance / static_cast<double>(num_paths));
+
+    return {mean, std_error};
+}
+
 }  // namespace bscpp

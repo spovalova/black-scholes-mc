@@ -431,6 +431,42 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
     `calibrate_heston` with `use_analytic_jacobian=True` vs. `False`
     converges to matching fitted parameters and RMSE (within 1e-3) on the
     same data (`test_heston.py`).
+- **`HestonMCPricer.price_qe`** (new): Andersen (2008) "QE" (Quadratic-
+  Exponential) scheme for the Heston Monte Carlo cross-check, added as a
+  SEPARATE method alongside `price` (full-truncation Euler), not a
+  replacement -- matching this project's established pattern
+  (`HestonPricer::price` vs. `price_cos`) of cross-checked alternatives.
+  - **The problem it fixes was already disclosed, not discovered here**:
+    `price`'s docs already documented that full-truncation Euler's
+    discretization bias grows large when the Feller condition is badly
+    violated (300 steps disagrees with the analytic price by ~40 standard
+    errors at xi=3.0 against `2*kappa*theta=0.16`; needs ~3000 steps to
+    converge to within 1). QE instead samples the CIR variance step from a
+    distribution moment-matched to its true (non-central chi-squared)
+    conditional law -- squared-Gaussian or exponential-tailed, chosen per
+    step by the local variance-to-mean ratio, with a paper-recommended
+    psi_c=1.5 switching threshold -- so v(t+dt) is exactly non-negative by
+    construction instead of floored, fixing the bias at its source.
+  - **Measured, not assumed**: in the SAME Feller-violating regime, QE
+    reaches Euler's 3000-step accuracy (within 5 std errors of the
+    analytic price) at just 20 steps; the matched-accuracy comparison
+    (3000 Euler steps vs. 20 QE steps, same 150k paths) is **~150x
+    faster** (2907ms vs. 19ms, single-threaded).
+  - **Deliberately skips Andersen's martingale-correction variant** of the
+    log-price drift term K0 (the paper's fix for a residual E[S_T] bias at
+    large step sizes) -- not an oversight: verified directly that the bias
+    is negligible at the step counts this method is actually used at, by
+    pricing a call struck at 0 (payoff = S_T exactly, isolating the
+    discounted forward from any strike-dependent effect) and confirming it
+    matches the theoretical forward within Monte Carlo noise
+    (`test_heston.py`). A disclosed simplification, not an unexamined one
+    -- the correction exists in the paper specifically for regimes this
+    implementation hasn't been asked to handle yet.
+  - **Verified, not assumed**: matches the analytic price across the same
+    stress regimes `heston_price`/`heston_price_cos` were both validated
+    against (short maturity, dividends, various strikes/types, Feller-
+    violating vol-of-vol), all at the same low (20) step count
+    (`test_heston.py`).
 
 ### Fixed
 

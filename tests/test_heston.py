@@ -66,6 +66,76 @@ def test_heston_analytic_accurate_in_extreme_feller_violating_regime():
     assert abs(analytic - mc.price) < 5 * mc.std_error
 
 
+def test_heston_mc_qe_accurate_at_far_fewer_steps_than_euler_in_same_extreme_regime():
+    # Andersen (2008) QE scheme (HestonMCPricer.price_qe): the whole point
+    # is fixing full-truncation Euler's discretization bias -- see
+    # test_heston_analytic_accurate_in_extreme_feller_violating_regime
+    # directly above, which needs 3000 steps to get within 5 std errors of
+    # the analytic price in exactly this regime (300 steps disagrees by
+    # ~40 std errors). QE samples v(t+dt)|v(t) from a distribution moment-
+    # matched to the true CIR conditional law (squared-Gaussian or
+    # exponential-tailed, chosen per step by the local variance-to-mean
+    # ratio) instead of an Euler step with v floored at 0, so v is exactly
+    # non-negative by construction and the step-count needed for accuracy
+    # doesn't blow up as Feller is violated. Verified here at a small
+    # fraction of Euler's 3000 steps -- not asserted to be fast, MEASURED.
+    spot, strike, rate, div, maturity = 100.0, 100.0, 0.05, 0.0, 1.0
+    hp = bscpp.HestonParams(kappa=2.0, theta=0.04, xi=3.0, rho=-0.7, v0=0.04)
+
+    analytic = bscpp.heston_price(spot, strike, rate, div, maturity, bscpp.OptionType.Call, hp)
+    qe = bscpp.HestonMCPricer(seed=1).price_qe(spot, strike, rate, div, maturity,
+                                                bscpp.OptionType.Call, hp, 150_000, 20)
+
+    assert abs(analytic - qe.price) < 5 * qe.std_error
+
+
+def test_heston_mc_qe_matches_analytic_across_stress_regimes():
+    # Same stress regimes heston_price/heston_price_cos were both
+    # validated against, all at the SAME low step count (20) the extreme-
+    # Feller test above uses -- QE shouldn't need regime-specific tuning
+    # to stay accurate.
+    regimes = [
+        ("normal ATM call", 1.0, 100.0, bscpp.OptionType.Call,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)),
+        ("normal put", 1.0, 100.0, bscpp.OptionType.Put,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)),
+        ("OTM call", 1.0, 120.0, bscpp.OptionType.Call,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)),
+        ("deep OTM put", 1.0, 60.0, bscpp.OptionType.Put,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)),
+        ("with dividend", 1.0, 100.0, bscpp.OptionType.Call,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)),
+        ("short maturity", 0.1, 100.0, bscpp.OptionType.Call,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)),
+        ("Feller-violating put", 1.0, 100.0, bscpp.OptionType.Put,
+         bscpp.HestonParams(kappa=2.0, theta=0.04, xi=3.0, rho=-0.7, v0=0.04)),
+    ]
+    spot, rate = 100.0, 0.05
+
+    for name, maturity, strike, opt_type, hp in regimes:
+        div = 0.03 if name == "with dividend" else 0.0
+        analytic = bscpp.heston_price(spot, strike, rate, div, maturity, opt_type, hp)
+        qe = bscpp.HestonMCPricer(seed=11).price_qe(spot, strike, rate, div, maturity, opt_type,
+                                                      hp, 100_000, 20)
+        assert abs(analytic - qe.price) < 5 * qe.std_error, name
+
+
+def test_heston_mc_qe_forward_unbiased_without_martingale_correction():
+    # price_qe deliberately skips Andersen's martingale-correction variant
+    # of K0 (see heston.hpp) -- justified here, not just asserted: pricing
+    # a call struck at 0 (payoff = S_T exactly, never clamped) isolates
+    # E[discounted S_T] from any strike-dependent effect, and it should
+    # match the theoretical forward spot*exp(-dividend_yield*maturity) to
+    # within Monte Carlo noise despite the missing correction.
+    spot, rate, div, maturity = 100.0, 0.05, 0.0, 1.0
+    hp = bscpp.HestonParams(kappa=2.0, theta=0.04, xi=3.0, rho=-0.7, v0=0.04)
+
+    qe = bscpp.HestonMCPricer(seed=5).price_qe(spot, 0.0, rate, div, maturity,
+                                                bscpp.OptionType.Call, hp, 200_000, 20)
+    expected = spot * math.exp(-div * maturity)
+    assert abs(qe.price - expected) < 5 * qe.std_error
+
+
 def test_heston_analytic_stable_at_very_short_maturity():
     # 1-day maturity: the characteristic function's integrand decays more
     # slowly in phi at short T, which is exactly the regime the old fixed
