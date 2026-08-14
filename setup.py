@@ -10,6 +10,7 @@ ext_modules = [
             "cpp/src/monte_carlo.cpp",
             "cpp/src/longstaff_schwartz.cpp",
             "cpp/src/heston.cpp",
+            "cpp/src/crr_tree.cpp",
         ],
         include_dirs=["cpp/include"],
         cxx_std=17,

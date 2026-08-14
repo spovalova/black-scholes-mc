@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 
 #include "bscpp/black_scholes.hpp"
+#include "bscpp/crr_tree.hpp"
 #include "bscpp/heston.hpp"
 #include "bscpp/longstaff_schwartz.hpp"
 #include "bscpp/monte_carlo.hpp"
@@ -129,4 +130,18 @@ PYBIND11_MODULE(_core, m) {
         .def("price", &HestonMCPricer::price, py::arg("spot"), py::arg("strike"), py::arg("rate"),
              py::arg("dividend_yield"), py::arg("maturity"), py::arg("type"), py::arg("params"),
              py::arg("num_paths"), py::arg("num_steps"));
+
+    m.def("crr_price", &CRRPricer::price, py::arg("spot"), py::arg("strike"), py::arg("rate"),
+          py::arg("dividend_yield"), py::arg("maturity"), py::arg("type"), py::arg("vol"),
+          py::arg("num_steps") = 200,
+          "American-style price via a dividend-aware Cox-Ross-Rubinstein binomial "
+          "tree -- see crr_tree.hpp for why this, not Longstaff-Schwartz MC, is the "
+          "chain pipeline's American pricer.");
+    m.def("crr_implied_vol", &CRRPricer::implied_vol, py::arg("spot"), py::arg("strike"),
+          py::arg("rate"), py::arg("dividend_yield"), py::arg("maturity"), py::arg("type"),
+          py::arg("market_price"), py::arg("num_steps") = 200, py::arg("tol") = 1e-6,
+          py::arg("max_iter") = 100,
+          "American implied vol via Brent's method against crr_price -- NaN if "
+          "market_price isn't bracketed by [1e-6, 5.0] vol, matching bs_implied_vol's "
+          "contract exactly.");
 }

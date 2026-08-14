@@ -96,8 +96,10 @@ cpp/                          C++ core
   include/bscpp/
     types.hpp                  shared structs (MarketInputs, Greeks, MCResult)
     black_scholes.hpp           analytic BS pricer, Greeks, IV solver, batch variants
+    brent.hpp                    shared bracketed root-finder (BS + CRR implied vol)
     monte_carlo.hpp              European MC pricer (antithetic + CRN Greeks)
-    longstaff_schwartz.hpp        American MC pricer (LSM regression)
+    longstaff_schwartz.hpp        American MC pricer (LSM regression, cross-check only)
+    crr_tree.hpp                  American binomial tree (production American pricer)
     heston.hpp                     Heston stochastic-vol semi-analytic + MC pricer
   src/                          implementations + pybind11 bindings
 
@@ -154,6 +156,18 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   look-ahead bias of regressing and pricing on the same paths. Validated
   against the paper's own benchmark (S=36, K=40, r=6%, vol=20%, T=1y ->
   ~4.47-4.48) and the no-early-exercise identity for dividend-free calls.
+  **Not this project's production American pricer** (see below) -- kept
+  as an independent cross-check on the CRR tree and for the path-
+  dependent/multi-factor generalizations Monte Carlo is suited for and a
+  binomial tree isn't.
+- Dividend-aware Cox-Ross-Rubinstein binomial tree (`crr_price`,
+  `crr_implied_vol`, `bscpp.price_american_crr`) -- the actual production
+  American pricer: deterministic (no simulation noise), microseconds per
+  price at 200 steps, and what `StripPricer(american=True)` uses to solve
+  American implied vol in the chain pipeline instead of the closed-form
+  European Black-Scholes formula (see "Chain pricing" below for why that
+  swap matters). Cross-checked against LSM and against the same
+  Longstaff-Schwartz (2001) benchmark above.
 
 **Rate curve** (`bscpp.curve.ZeroCurve`)
 - Minimal piecewise-flat, continuously-compounded zero-rate curve --
@@ -244,6 +258,25 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   quotes -- replacing an assumption with a market-implied number, not
   just reporting one alongside it. `implied_forward`/`implied_carry` are
   reported as chain columns either way.
+- `StripPricer(..., american=True)`: solves IV against the dividend-aware
+  CRR binomial tree instead of closed-form European Black-Scholes, and
+  reports a `crr_price`/`crr_error_vs_market`/`crr_error_pct` alongside
+  the always-computed European `bs_price` view. Real equity chains are
+  American-style; solving a European IV from an American market price
+  silently absorbs an early-exercise premium the European formula can't
+  represent -- confirmed directly (not just argued): at the same market
+  price, the American-consistent solve infers a measurably LOWER put IV
+  than the European solve does, exactly the mismatch this removes (see
+  `test_strip_pricer_american_mode_reports_crr_price_and_higher_put_iv_
+  solve`). Defaults to `False` -- not because European is preferred, but
+  because `MockProvider`'s synthetic chain generates its own "true"
+  prices via European BS internally, so `american=True` against
+  `MockProvider` specifically would be a self-consistency mismatch, not a
+  more realistic test; against real data (`PolygonProvider`) it's the
+  more realistic choice. `bs_price`/Greeks remain the European values at
+  whichever IV was solved either way -- CRR has no closed-form Greeks, so
+  those stay an explicit approximation in `american=True` mode, not exact
+  American sensitivities.
 
 **Portfolio risk aggregation** (`bscpp.risk`)
 - `PortfolioRiskManager`: true DOLLAR delta/gamma (not raw share-equivalent
@@ -327,7 +360,7 @@ pytest tests/ -q -m "not slow"   # fast suite, ~15s
 ## Run the demos (no API key needed)
 
 ```bash
-python examples/american_pricing_demo.py     # European vs. American (LSM) pricing
+python examples/american_pricing_demo.py     # European vs. American (CRR, cross-checked vs LSM)
 python examples/strategy_demo.py               # straddle/strangle/vertical/strip/strap/butterfly
 python examples/portfolio_risk_demo.py          # net Greeks + limit breaches across a portfolio
 python examples/hedging_pnl_experiment.py       # realized-vs-implied vol P&L sweep + transaction costs
@@ -429,9 +462,10 @@ inputs = bscpp.make_inputs(100, 100, 0.05, 0.2, 1.0, "call")
 greeks = bscpp.bs_greeks(inputs)
 desk_greeks = bscpp.trading_greeks(greeks)  # vega/rho per 1%, theta per day
 
-# Monte Carlo (European) and American (Longstaff-Schwartz LSM)
+# Monte Carlo (European) and American (CRR tree -- production; LSM -- cross-check only)
 mc = bscpp.price_mc(spot=100, strike=100, rate=0.05, vol=0.2, maturity=1.0, num_paths=200_000)
-am = bscpp.price_american(36, 40, 0.06, 0.2, 1.0, "put", num_paths=100_000, num_steps=50)
+am = bscpp.price_american_crr(36, 40, 0.06, 0.2, 1.0, "put", num_steps=200)
+am_lsm = bscpp.price_american(36, 40, 0.06, 0.2, 1.0, "put", num_paths=100_000, num_steps=50)
 
 # Heston stochastic vol (semi-analytic; HestonMCPricer for the independent MC cross-check)
 hp = bscpp.HestonParams(kappa=2.0, theta=0.04, xi=0.4, rho=-0.7, v0=0.05)

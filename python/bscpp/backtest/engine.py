@@ -71,16 +71,37 @@ class StripPricer:
         dividend_yield: float = 0.0,
         mc_paths: int = 50_000,
         mc_seed: int = 42,
+        american: bool = False,
     ):
         """rate: a bare float (flat rate) or a bscpp.ZeroCurve -- resolved
         to the scalar rate at this chain's own maturity in price_strip.
         No default: a hardcoded rate is exactly the kind of assumption
-        that shouldn't be silently inherited by every caller."""
+        that shouldn't be silently inherited by every caller.
+
+        american: solve IV against the dividend-aware CRR binomial tree
+        (bscpp.crr_implied_vol) instead of the closed-form European
+        Black-Scholes formula, and report a crr_price column priced at
+        that IV. Real equity-option chains are American-style, so this is
+        the more realistic choice against PolygonProvider data -- solving
+        a European IV from an American market price silently absorbs an
+        early-exercise premium the European formula can't represent (see
+        crr_tree.hpp). Defaults to False, NOT because European is
+        preferred, but because MockProvider's synthetic chain generates
+        its own "true" prices via European BS internally (see
+        data_provider.py): against MockProvider specifically, american=
+        True would introduce a self-consistency mismatch between how the
+        test data was generated and how it's solved, not a more realistic
+        test. bs_price/delta/gamma/vega/theta/rho remain the European
+        values at whichever IV was solved either way -- CRR has no
+        closed-form Greeks, so this is an explicit approximation in
+        american mode, not exact American sensitivities.
+        """
         self.provider = provider
         self.rate = rate
         self.dividend_yield = dividend_yield
         self.mc_paths = mc_paths
         self.mc = bscpp.MonteCarloPricer(seed=mc_seed)
+        self.american = american
 
     def price_strip(
         self,
@@ -92,9 +113,11 @@ class StripPricer:
     ) -> pd.DataFrame:
         """Price every contract in [strike_range * spot] at `expiration`.
 
-        Returns the chain DataFrame augmented with: spot, T, model_iv,
-        bs_price, mc_price, mc_std_error, delta/gamma/vega/theta/rho,
-        bs_error_vs_market, bs_error_pct.
+        Returns the chain DataFrame augmented with: spot, T, implied_forward,
+        implied_carry, model_iv, iv_source, bs_price, mc_price,
+        mc_std_error, delta/gamma/vega/theta/rho, bs_error_vs_market,
+        bs_error_pct -- plus crr_price/crr_error_vs_market/crr_error_pct
+        when constructed with american=True (see __init__).
         """
         as_of = as_of or dt.date.today()
         spot = self.provider.get_underlying_price(ticker, as_of=as_of)
@@ -170,12 +193,24 @@ class StripPricer:
         model_ivs = np.where(needs_solve, np.nan, given_iv)
         if solve_mask.any():
             idx = np.flatnonzero(solve_mask)
-            seed_inputs = [
-                bscpp.make_inputs(spot, chain["strike"].iat[i], rate, 0.20, t_years,
-                                   otypes[i], dividend_yield)
-                for i in idx
-            ]
-            solved = bscpp.bs_implied_vol_batch(seed_inputs, [mid[i] for i in idx])
+            if self.american:
+                # No batch CRR binding (not worth it at chain scale -- each
+                # solve is ~100us, so even a 100-contract chain is ~10ms;
+                # see test_crr_tree.py's timing check before adding one).
+                type_enums = [bscpp.OptionType.Call if otypes[i] == "call" else bscpp.OptionType.Put
+                              for i in idx]
+                solved = [
+                    bscpp.crr_implied_vol(spot, chain["strike"].iat[i], rate, dividend_yield,
+                                           t_years, t, mid[i])
+                    for i, t in zip(idx, type_enums)
+                ]
+            else:
+                seed_inputs = [
+                    bscpp.make_inputs(spot, chain["strike"].iat[i], rate, 0.20, t_years,
+                                       otypes[i], dividend_yield)
+                    for i in idx
+                ]
+                solved = bscpp.bs_implied_vol_batch(seed_inputs, [mid[i] for i in idx])
             for i, iv in zip(idx, solved):
                 if iv == iv:  # solve succeeded
                     model_ivs[i] = iv
@@ -195,6 +230,16 @@ class StripPricer:
             for i in range(len(chain))
         ]
         results = bscpp.bs_price_with_greeks_batch(inputs_list)
+
+        crr_prices = None
+        if self.american:
+            type_enums_all = [bscpp.OptionType.Call if t == "call" else bscpp.OptionType.Put
+                               for t in otypes]
+            crr_prices = [
+                bscpp.crr_price(spot, chain["strike"].iat[i], rate, dividend_yield, t_years,
+                                 type_enums_all[i], safe_ivs[i]) if priceable[i] else float("nan")
+                for i in range(len(chain))
+            ]
 
         if use_mc:
             mc_results = [
@@ -225,6 +270,11 @@ class StripPricer:
         chain["rho"] = nan_if_fallback([r.greeks.rho for r in results])
         chain["bs_error_vs_market"] = chain["bs_price"] - chain["mid"]
         chain["bs_error_pct"] = chain["bs_error_vs_market"] / chain["mid"]
+
+        if crr_prices is not None:
+            chain["crr_price"] = crr_prices
+            chain["crr_error_vs_market"] = chain["crr_price"] - chain["mid"]
+            chain["crr_error_pct"] = chain["crr_error_vs_market"] / chain["mid"]
 
         return chain.reset_index(drop=True)
 

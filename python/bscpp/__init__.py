@@ -23,6 +23,8 @@ from bscpp._core import (
     bs_price,
     bs_price_with_greeks,
     bs_price_with_greeks_batch,
+    crr_implied_vol,
+    crr_price,
     heston_price,
     heston_price_batch,
     heston_satisfies_feller_condition,
@@ -56,6 +58,8 @@ __all__ = [
     "bs_price",
     "bs_price_with_greeks",
     "bs_price_with_greeks_batch",
+    "crr_price",
+    "crr_implied_vol",
     "HestonMCPricer",
     "HestonParams",
     "heston_price",
@@ -65,6 +69,7 @@ __all__ = [
     "price",
     "price_mc",
     "price_american",
+    "price_american_crr",
     "Leg",
     "StrategyPricer",
     "StrategyResult",
@@ -159,3 +164,22 @@ def price_american(spot, strike, rate, vol, maturity, option_type="put", dividen
     inputs = make_inputs(spot, strike, rate, vol, maturity, option_type, dividend_yield)
     lsm = AmericanPricer(seed=seed)
     return lsm.price(inputs, num_paths, num_steps, poly_degree, num_calibration_paths)
+
+
+def price_american_crr(spot, strike, rate, vol, maturity, option_type="put", dividend_yield=0.0,
+                        num_steps=200):
+    """American-style price via a dividend-aware Cox-Ross-Rubinstein binomial
+    tree. Deterministic (no std_error -- there's no simulation noise to
+    report), and microseconds per call at the default num_steps, vs.
+    price_american's Monte Carlo LSM.
+
+    This, not price_american, is what StripPricer uses for American implied
+    vol in the chain pipeline (see bscpp.backtest.engine): a real equity
+    chain is American-style, LSM is overkill for a single-asset vanilla
+    price with no path dependence, and its simulation noise would make an
+    IV solve noisy for no benefit. price_american/AmericanPricer (LSM)
+    remains this project's cross-check on CRR and its generalization to
+    path-dependent/multi-factor cases CRR can't handle -- see crr_tree.hpp.
+    """
+    otype = OptionType.Call if str(option_type).lower().startswith("c") else OptionType.Put
+    return crr_price(spot, strike, rate, dividend_yield, maturity, otype, vol, num_steps)

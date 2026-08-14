@@ -62,6 +62,33 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
 
 ### Added
 
+- **`bscpp.crr_price`/`crr_implied_vol`/`price_american_crr`**: dividend-
+  aware Cox-Ross-Rubinstein binomial tree, now this project's production
+  American pricer -- deterministic, ~14us/price at num_steps=200 (matches
+  the timing claim, see `test_crr_tree.py`), converges to the Longstaff-
+  Schwartz (2001) benchmark (S=36,K=40,r=6%,vol=20%,T=1y -> ~4.487, within
+  1.8 std errors of the existing LSM implementation) and to European BS
+  for a no-dividend call. `StripPricer(american=True)` now solves IV
+  against CRR instead of closed-form European BS and reports `crr_price`/
+  `crr_error_vs_market`/`crr_error_pct` alongside the always-present
+  European `bs_price` view. Removes the mismatch of solving a European IV
+  from an American market price (which silently absorbs an early-exercise
+  premium the European formula can't represent) -- confirmed directly,
+  not just argued: at the identical market price, the American-consistent
+  solve infers a measurably LOWER put IV than the European solve does.
+  Defaults to `american=False`: not because European is preferred, but
+  because `MockProvider`'s synthetic chain generates its own "true"
+  prices via European BS internally, so `american=True` against
+  `MockProvider` would be a self-consistency mismatch in tests, not a
+  more realistic one; `american=True` is the more realistic choice
+  against real (`PolygonProvider`) data. `brent.hpp` extracted from
+  `black_scholes.cpp` (previously private to that translation unit) so
+  `CRRPricer::implied_vol` reuses the identical bracketed solver instead
+  of a second copy -- both price monotonically in vol. LSM repositioned
+  in docs/README as the cross-check and path-dependent/multi-factor
+  generalization, not the production American pricer, per its actual role
+  now. 8 new tests (`test_crr_tree.py`) plus a `StripPricer` integration
+  test confirming the American-vs-European IV divergence direction.
 - **`bscpp.curve.ZeroCurve`**: minimal piecewise-flat zero-rate curve
   (`df(t)`, `zero_rate(t)`, `forward_rate(t1, t2)`) plus `resolve_rate`,
   threaded through `StripPricer`, `HedgingBacktester` (both option pricing

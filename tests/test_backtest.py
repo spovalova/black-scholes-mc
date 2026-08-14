@@ -195,3 +195,36 @@ def test_strip_pricer_solves_otm_only():
     otm_puts = puts[puts["strike"] <= forward]
     assert (itm_puts["iv_source"] == "fallback").all()
     assert (otm_puts["iv_source"] == "solved").any()
+
+
+def test_strip_pricer_american_mode_reports_crr_price_and_higher_put_iv_solve():
+    provider = MockProvider(rate=0.05, spot=100.0, base_vol=0.22)
+    european = StripPricer(provider, rate=0.05, mc_paths=1, american=False)
+    american = StripPricer(provider, rate=0.05, mc_paths=1, american=True)
+    expiration = dt.date.today() + dt.timedelta(days=180)  # long-dated: premium is easy to see
+
+    euro_result = european.price_strip("TEST", expiration, strike_range=(0.9, 1.1), use_mc=False)
+    amer_result = american.price_strip("TEST", expiration, strike_range=(0.9, 1.1), use_mc=False)
+
+    assert "crr_price" not in euro_result.columns
+    assert "crr_price" in amer_result.columns and "crr_error_vs_market" in amer_result.columns
+
+    solved_amer = amer_result[amer_result["iv_source"] == "solved"]
+    assert not solved_amer.empty
+    # crr_price at the solved IV should closely reproduce the market mid
+    # it was solved from -- the same self-consistency check bs_price gets
+    # implicitly in the European case.
+    assert (solved_amer["crr_error_vs_market"].abs() < 0.05).all()
+
+    # American puts are worth MORE than European at the same vol (early-
+    # exercise premium), so to match the SAME market mid, the American-
+    # consistent solve infers a LOWER implied vol than the European solve
+    # does -- this is the actual mismatch the CRR tree exists to remove.
+    solved_puts_euro = euro_result[(euro_result["type"] == "put") &
+                                    (euro_result["iv_source"] == "solved")]
+    solved_puts_amer = amer_result[(amer_result["type"] == "put") &
+                                    (amer_result["iv_source"] == "solved")]
+    merged = solved_puts_euro[["strike", "model_iv"]].merge(
+        solved_puts_amer[["strike", "model_iv"]], on="strike", suffixes=("_euro", "_amer"))
+    assert not merged.empty
+    assert (merged["model_iv_amer"] < merged["model_iv_euro"]).all()

@@ -6,6 +6,11 @@ Usage:
 
     # Real data via Polygon.io (requires POLYGON_API_KEY, "Options Starter"+ plan):
     python examples/run_backtest.py --ticker SPY --expiration 2026-09-19
+
+    # American-consistent IV solve (real equity chains ARE American-style;
+    # see StripPricer's american= docstring for why --mock doesn't default
+    # to this):
+    python examples/run_backtest.py --ticker SPY --expiration 2026-09-19 --american
 """
 
 from __future__ import annotations
@@ -28,6 +33,9 @@ def parse_args():
     p.add_argument("--strike-low", type=float, default=0.85)
     p.add_argument("--strike-high", type=float, default=1.15)
     p.add_argument("--mock", action="store_true", help="use synthetic data, no API key required")
+    p.add_argument("--american", action="store_true",
+                    help="solve IV against the CRR American tree instead of European BS "
+                         "(see StripPricer's american= docstring)")
     p.add_argument("--backtest-days", type=int, default=0,
                     help="if > 0, also run a naive multi-day loop (see Backtester docstring caveat)")
     return p.parse_args()
@@ -42,7 +50,7 @@ def main():
     else:
         provider = PolygonProvider()  # reads POLYGON_API_KEY from env
 
-    pricer = StripPricer(provider, rate=args.rate, mc_paths=args.mc_paths)
+    pricer = StripPricer(provider, rate=args.rate, mc_paths=args.mc_paths, american=args.american)
 
     if args.expiration:
         expiration = dt.date.fromisoformat(args.expiration)
@@ -61,6 +69,8 @@ def main():
 
     cols = ["strike", "type", "mid", "model_iv", "bs_price", "mc_price",
             "bs_error_vs_market", "delta", "gamma", "vega", "theta"]
+    if args.american:
+        cols = cols[:7] + ["crr_price", "crr_error_vs_market"] + cols[7:]
     print(result[cols].to_string(index=False))
 
     if args.backtest_days > 0:
