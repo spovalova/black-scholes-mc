@@ -62,6 +62,26 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
 
 ### Added
 
+- **`benchmarks/`** (new, not part of the default test suite -- see
+  `benchmarks/README.md`): external speed comparison against QuantLib
+  1.43 and vollib 1.0.11 on identical inputs, correctness-asserted before
+  anything is timed. Replaces the self-referential "3.1x faster than my
+  own previous version" framing with an absolute reference. Results
+  (Apple M4 Pro, single-threaded, `pytest-benchmark`): BS price 21x
+  faster, BS implied vol 39x faster, American (CRR, 500 steps) 6x faster
+  -- and Heston price **14x slower**, published because it's true, with
+  the honest reason (adaptive Simpson quadrature vs. QuantLib's
+  fixed-node table, a tradeoff already documented in `heston.hpp` before
+  this benchmark existed to quantify it) rather than omitted. Caught and
+  fixed a real methodology trap before trusting any of these numbers:
+  QuantLib's `NPV()` is cached by its lazy-evaluation object model until
+  a watched quote changes (~6x faster for a cached call vs. a genuinely
+  recomputed one, confirmed by direct measurement) -- every QuantLib
+  benchmark now perturbs the spot quote before each call to force real
+  recomputation (`benchmarks/conftest.py`), matching what a calibration
+  loop repricing against a moving quote would trigger naturally. Full
+  table and hardware disclosure in the README's "External benchmarks"
+  section.
 - **README "Scope" section**: elevated the single "Out of scope" bullet
   (previously buried at the end of "What's implemented") into its own
   top-level section, and expanded it to cover everything surfaced by this

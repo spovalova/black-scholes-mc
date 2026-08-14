@@ -409,6 +409,55 @@ guess whether it's an oversight.
   grid-boundary artifacts, not papered over with a number a wider search
   would just move again.
 
+## External benchmarks
+
+"3.1x faster than my own previous version" (the `heston_price_batch`
+CHANGELOG entry) is a self-referential claim -- it says nothing about
+whether the *result* is fast in any absolute sense. `benchmarks/`
+compares this project's pricers against two independent, established
+references on identical inputs: [QuantLib](https://www.quantlib.org/)
+1.43 (analytic BS, CRR binomial American at the same step count, analytic
+Heston) and [vollib](http://vollib.org/) 1.0.11 (analytic BS/BSM price
+and implied vol; vollib doesn't price American or Heston, hence no third
+column there). Every benchmark file asserts numerical agreement with the
+reference within a stated tolerance *before* timing anything -- a fast
+wrong answer isn't a result (see each file's `test_*_correctness`).
+
+Hardware: Apple M4 Pro, macOS 15.1, Python 3.13.5, single-threaded,
+`pytest-benchmark` 5.2.3, median of 30-150k rounds depending on the test
+(warm cache, `time.perf_counter`). QuantLib's `NPV()` is cached by its
+lazy-evaluation object model until a watched quote changes -- confirmed
+by direct measurement (~6x faster for a cached call vs. a genuinely
+recomputed one) -- so every QuantLib benchmark perturbs the spot quote by
+an alternating +-1e-10 before each call to force real recomputation; see
+`benchmarks/conftest.py`.
+
+| Pricer | bscpp | QuantLib | vollib | bscpp vs. faster reference |
+|---|---:|---:|---:|---|
+| BS price | 0.07us | 1.50us | 1.61us | **21x faster** |
+| BS implied vol | 0.12us | 4.79us | 7.59us | **39x faster** |
+| American (CRR, 500 steps) | 84.9us | 516.3us | -- | **6x faster** |
+| Heston price | 336.2us | 24.4us | -- | **14x SLOWER** |
+
+The Heston loss is real and already explained in the code, not a
+surprise found here: `heston.hpp` deliberately uses adaptive Simpson
+quadrature (self-terminating on measured error, no risk of a
+transcribed-table copying error) rather than the fixed-node quadrature
+table production engines like QuantLib's `AnalyticHestonEngine`
+typically use for speed. `heston_price_batch` (see CHANGELOG) already
+takes the fixed-node approach for the calibration hot path specifically,
+where the same characteristic-function evaluations are shared across a
+whole strike grid -- this single-call, single-strike benchmark is
+exactly the case that optimization doesn't cover, so the gap shown here
+is the honest cost of the adaptive path a cold single-price call still
+pays in full. A fixed-node COS/FFT engine would likely close most of
+this gap for the single-price case too, at the cost of carrying a second
+Heston pricer to keep cross-checked against this one -- a real tradeoff,
+not yet made.
+
+Run it yourself: `pip install -e ".[benchmark]"` then
+`pytest benchmarks/ --benchmark-only --benchmark-columns=min,mean,stddev,median,rounds`.
+
 ## Setup
 
 Requires a C++17 compiler (Xcode command line tools on macOS) and Python
