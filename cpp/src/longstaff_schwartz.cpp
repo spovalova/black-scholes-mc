@@ -62,7 +62,7 @@ std::vector<double> basis_at(double x, int k) {
     return basis;
 }
 
-std::vector<std::vector<double>> simulate_paths(std::mt19937_64& rng, const MarketInputs& in,
+std::vector<std::vector<double>> simulate_paths(Philox4x64& rng, const MarketInputs& in,
                                                  long num_paths, int num_steps, double drift,
                                                  double diffusion) {
     std::vector<std::vector<double>> paths(
@@ -155,7 +155,12 @@ std::vector<std::optional<std::vector<double>>> calibrate(
 }  // namespace
 
 AmericanPricer::AmericanPricer(std::uint64_t seed)
-    : rng_(seed), rng_calibration_(seed + 1768237423ULL) {}
+    // Philox's stream parameter gives a principled, provably-non-
+    // overlapping second stream from the same seed (see philox.hpp) --
+    // replaces the previous arbitrary-magic-number seed offset
+    // (seed + 1768237423ULL), which only relied on that offset being
+    // "big enough" to avoid overlap in mt19937_64's sequential state.
+    : rng_(seed, 0), rng_calibration_(seed, 1) {}
 
 double AmericanPricer::payoff(double s, double strike, OptionType type) {
     if (type == OptionType::Call) {

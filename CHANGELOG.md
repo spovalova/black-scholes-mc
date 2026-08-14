@@ -62,6 +62,44 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
 
 ### Added
 
+- **`bscpp::Philox4x64`** (`philox.hpp`): counter-based RNG (Salmon,
+  Moraes, Sanches, Pande 2011) replacing `std::mt19937_64` in every Monte
+  Carlo pricer (`MonteCarloPricer`, `AmericanPricer`, `HestonMCPricer`).
+  Upgrades the earlier reproducibility fix (`std::normal_distribution` ->
+  hand-rolled Box-Muller on `std::mt19937_64`, see the "Fixed" section
+  below) from "internally self-consistent" to "matches an independent,
+  already-portable reference implementation bit-for-bit": raw output is
+  cross-validated against `numpy.random.Philox` across 7 seeds including
+  edge cases (`test_philox.py`), not just assumed correct because the
+  constants looked right. Getting the constants/round-function/portable-
+  multiply right on the first attempt without that reference would have
+  been lucky, not verified -- the raw output was compared directly, not
+  inferred from statistical shape.
+  - Portable 64x64->128-bit multiply deliberately avoids `__uint128_t` (a
+    GCC/Clang extension MSVC doesn't support -- this project's CI runs on
+    `windows-latest` too): the schoolbook 32-bit-limb expansion is
+    standard C++, verified bit-exact against Python's arbitrary-precision
+    integers across random and edge-case inputs before being trusted in
+    the actual generator.
+  - `AmericanPricer`'s calibration/pricing path sets now use Philox's
+    `stream` parameter (`rng_(seed, 0)`, `rng_calibration_(seed, 1)`)
+    instead of an arbitrary seed offset (`seed + 1768237423ULL`) --
+    provably non-overlapping streams from the same seed, not "probably
+    far enough apart in a 2^19937-period sequential state."
+  - Counter-based generation (`seek(counter)` reaches any stream position
+    directly, no replay needed) is what makes per-thread streams for
+    parallelized path generation possible with zero coordination --
+    confirmed disjoint via `seek()` to different counters
+    (`test_philox_seek_to_distinct_counters_gives_disjoint_streams`), sets
+    up the OpenMP work below.
+  - Measured cost, not assumed free: ~1.45x slower per normal draw than
+    the previous `mt19937_64`-backed version (25.8ns vs 17.8ns, Apple M4
+    Pro) -- Box-Muller's transcendental functions dominate enough that
+    this is well under the ~3.9x gap in raw generator throughput alone
+    (5.83ns vs 1.48ns/draw). Full test suite (122 tests) passes unchanged
+    -- Philox produces equally-valid uniform variates, so every
+    statistical/convergence test that was robust to *which* RNG algorithm
+    generated the paths remains robust here too.
 - **`benchmarks/`** (new, not part of the default test suite -- see
   `benchmarks/README.md`): external speed comparison against QuantLib
   1.43 and vollib 1.0.11 on identical inputs, correctness-asserted before

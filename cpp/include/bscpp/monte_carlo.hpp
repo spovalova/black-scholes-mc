@@ -1,9 +1,9 @@
 #pragma once
 
 #include <cstdint>
-#include <random>
 #include <vector>
 
+#include "bscpp/philox.hpp"
 #include "bscpp/types.hpp"
 
 namespace bscpp {
@@ -26,7 +26,7 @@ private:
     static double payoff(double s_t, double strike, OptionType type);
     MCResult price_with_z(const MarketInputs& in, const std::vector<double>& z, bool antithetic);
 
-    std::mt19937_64 rng_;
+    Philox4x64 rng_;
 };
 
 }  // namespace bscpp

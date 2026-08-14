@@ -1,11 +1,15 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <cstdint>
+#include <vector>
+
 #include "bscpp/black_scholes.hpp"
 #include "bscpp/crr_tree.hpp"
 #include "bscpp/heston.hpp"
 #include "bscpp/longstaff_schwartz.hpp"
 #include "bscpp/monte_carlo.hpp"
+#include "bscpp/philox.hpp"
 #include "bscpp/types.hpp"
 
 namespace py = pybind11;
@@ -130,6 +134,30 @@ PYBIND11_MODULE(_core, m) {
         .def("price", &HestonMCPricer::price, py::arg("spot"), py::arg("strike"), py::arg("rate"),
              py::arg("dividend_yield"), py::arg("maturity"), py::arg("type"), py::arg("params"),
              py::arg("num_paths"), py::arg("num_steps"));
+
+    // Testing-only: exposes raw Philox4x64 draws so test_philox.py can
+    // cross-validate them bit-for-bit against numpy.random.Philox on the
+    // same (seed, stream) -- not part of the public pricing API.
+    m.def("_philox_raw_draws", [](std::uint64_t seed, std::uint64_t stream, int n) {
+        Philox4x64 rng(seed, stream);
+        std::vector<std::uint64_t> out(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i) out[static_cast<size_t>(i)] = rng();
+        return out;
+    }, py::arg("seed"), py::arg("stream"), py::arg("n"));
+
+    // Testing-only: draws n values starting from an explicit seek()
+    // position, so test_philox.py can confirm seek() lands exactly where
+    // the equivalent number of sequential draws would have.
+    m.def("_philox_seek_draws",
+          [](std::uint64_t seed, std::uint64_t c0, std::uint64_t c1, std::uint64_t c2,
+             std::uint64_t c3, int n) {
+              Philox4x64 rng(seed);
+              rng.seek(c0, c1, c2, c3);
+              std::vector<std::uint64_t> out(static_cast<size_t>(n));
+              for (int i = 0; i < n; ++i) out[static_cast<size_t>(i)] = rng();
+              return out;
+          },
+          py::arg("seed"), py::arg("c0"), py::arg("c1"), py::arg("c2"), py::arg("c3"), py::arg("n"));
 
     m.def("crr_price", &CRRPricer::price, py::arg("spot"), py::arg("strike"), py::arg("rate"),
           py::arg("dividend_yield"), py::arg("maturity"), py::arg("type"), py::arg("vol"),

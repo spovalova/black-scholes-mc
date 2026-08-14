@@ -2,9 +2,9 @@
 
 #include <complex>
 #include <cstdint>
-#include <random>
 #include <vector>
 
+#include "bscpp/philox.hpp"
 #include "bscpp/types.hpp"
 
 namespace bscpp {
@@ -114,7 +114,7 @@ public:
                    int num_steps);
 
 private:
-    std::mt19937_64 rng_;
+    Philox4x64 rng_;
 };
 
 }  // namespace bscpp

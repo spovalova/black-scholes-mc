@@ -1,8 +1,8 @@
 #pragma once
 
 #include <cstdint>
-#include <random>
 
+#include "bscpp/philox.hpp"
 #include "bscpp/types.hpp"
 
 namespace bscpp {
@@ -45,8 +45,8 @@ public:
     static double payoff(double s, double strike, OptionType type);
 
 private:
-    std::mt19937_64 rng_;              // pricing path set
-    std::mt19937_64 rng_calibration_;  // independently-seeded calibration path set
+    Philox4x64 rng_;              // pricing path set
+    Philox4x64 rng_calibration_;  // independently-seeded calibration path set
 };
 
 }  // namespace bscpp

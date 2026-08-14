@@ -144,6 +144,26 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
 - Batch pricing/IV variants (`bs_price_with_greeks_batch`,
   `bs_implied_vol_batch`) that loop in C++ rather than crossing the
   Python/C++ boundary once per contract.
+- **Philox4x64-10** (Salmon et al. 2011) counter-based RNG (`philox.hpp`)
+  underlies every Monte Carlo pricer below, replacing `std::mt19937_64`.
+  Two things this actually buys, not just "a different generator": (1)
+  cross-platform reproducibility that's *verified*, not assumed -- raw
+  output is checked bit-for-bit against `numpy.random.Philox` across 7
+  seeds including edge cases (`test_philox.py`), the strongest available
+  portability claim (matching an independent, already-portable reference
+  implementation exactly, not merely being internally self-consistent
+  the way `std::mt19937_64` + `std::normal_distribution` looked before
+  the earlier fix -- see CHANGELOG); (2) counter-based generation means
+  `seek(counter)` reaches any point in the stream directly, with no need
+  to replay prior draws -- confirmed disjoint, non-overlapping streams
+  from the same seed via a `stream` parameter (`AmericanPricer`'s
+  calibration/pricing path sets now use this instead of an arbitrary
+  seed offset), which is what makes per-thread streams for parallelized
+  path generation possible with zero coordination. Measured cost, not
+  assumed free: ~1.45x slower per normal draw than the previous
+  `mt19937_64`-backed version (25.8ns vs 17.8ns, Apple M4 Pro) -- Box-
+  Muller's transcendental functions dominate enough that this is well
+  under the ~3.9x gap in raw generator throughput alone.
 - Monte Carlo European pricer under GBM: antithetic variates for variance
   reduction, Greeks via bump-and-reprice with common random numbers. The
   reported standard error is computed over antithetic **pair means** (the
