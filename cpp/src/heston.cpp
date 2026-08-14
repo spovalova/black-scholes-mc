@@ -6,6 +6,8 @@
 #include <functional>
 #include <stdexcept>
 
+#include "bscpp/portable_normal.hpp"
+
 namespace bscpp {
 
 namespace {
@@ -242,16 +244,14 @@ MCResult HestonMCPricer::price(double spot, double strike, double rate, double d
     const double sqrt_one_minus_rho2 = std::sqrt(std::max(1.0 - hp.rho * hp.rho, 0.0));
     const double discount = std::exp(-rate * maturity);
 
-    std::normal_distribution<double> normal(0.0, 1.0);
-
     double sum = 0.0;
     double sum_sq = 0.0;
     for (long p = 0; p < num_paths; ++p) {
         double s = spot;
         double v = hp.v0;
         for (int step = 0; step < num_steps; ++step) {
-            const double z_v = normal(rng_);
-            const double z_indep = normal(rng_);
+            const double z_v = standard_normal(rng_);
+            const double z_indep = standard_normal(rng_);
             const double z_s = hp.rho * z_v + sqrt_one_minus_rho2 * z_indep;
 
             const double v_pos = std::max(v, 0.0);  // full truncation

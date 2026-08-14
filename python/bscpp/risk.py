@@ -8,9 +8,18 @@ those is a materially different (and much larger) undertaking than a
 personal pricing/research project should claim to have solved. What this
 module *does* do honestly: given a list of positions (each with its own
 underlying, spot, and market inputs -- a real portfolio spans more than one
-name), it computes dollar Greeks per position and in aggregate, groups by
-underlying, and flags configurable limit breaches. That is a genuine,
-useful building block; it is not a trading desk's risk system.
+name), it computes true DOLLAR delta and gamma per position and in
+aggregate, groups by underlying, and flags configurable limit breaches.
+That is a genuine, useful building block; it is not a trading desk's risk
+system.
+
+Dollar, not share-equivalent: 100 shares of raw delta means something very
+different on a $20 stock than a $2000 one, so a cross-underlying limit
+checked in raw delta*quantity units (this project's own
+StrategyPricer/StrategyResult convention, correct there because a single
+strategy never mixes underlyings) doesn't actually aggregate risk
+meaningfully across names -- exactly the case this module exists for. See
+Position.greeks for the exact convention.
 """
 
 from __future__ import annotations
@@ -36,12 +45,32 @@ class Position:
     maturity: float | None = None  # required for call/put
 
     def greeks(self) -> dict:
-        """Dollar Greeks for this position (already scaled by quantity),
-        same convention StrategyPricer/StrategyResult uses elsewhere."""
+        """True dollar Greeks for this position -- comparable across
+        underlyings of different spot prices, which is the entire point
+        of a portfolio-level limit (100 shares of raw delta is a very
+        different risk on a $20 stock than a $2000 one).
+
+        dollar_delta = delta * quantity * spot -- the $ notional of stock
+        this position currently behaves like. For a stock position delta
+        is identically 1, so this collapses to quantity * spot, i.e. its
+        own market value, exactly as it should.
+
+        dollar_gamma = gamma * quantity * spot^2 / 100 -- the standard
+        desk convention for "the $ change in dollar delta for a 1% move
+        in the underlying," NOT raw gamma*quantity (this project's
+        StrategyPricer uses the raw, per-share convention instead,
+        correctly, since a single strategy never mixes underlyings and
+        so has no cross-name scale mismatch to correct for).
+
+        vega/theta/rho need no such correction: each is already a $
+        price sensitivity per contract (per 1.00 vol, per year, per 1.00
+        rate), so quantity alone dollarizes them correctly regardless of
+        the underlying's spot price.
+        """
         if self.instrument == "stock":
             return {
                 "price": self.spot * self.quantity,
-                "delta": self.quantity,
+                "delta": self.spot * self.quantity,
                 "gamma": 0.0,
                 "vega": 0.0,
                 "theta": 0.0,
@@ -55,8 +84,8 @@ class Position:
         result = bscpp.bs_price_with_greeks(inputs)
         return {
             "price": result.price * self.quantity,
-            "delta": result.greeks.delta * self.quantity,
-            "gamma": result.greeks.gamma * self.quantity,
+            "delta": result.greeks.delta * self.quantity * self.spot,
+            "gamma": result.greeks.gamma * self.quantity * self.spot ** 2 / 100.0,
             "vega": result.greeks.vega * self.quantity,
             "theta": result.greeks.theta * self.quantity,
             "rho": result.greeks.rho * self.quantity,

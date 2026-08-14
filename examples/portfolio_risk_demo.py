@@ -33,12 +33,16 @@ def main():
     print("\nBy underlying:")
     print(mgr.greeks_by_underlying(positions).to_string(index=False))
 
-    limits = bscpp.RiskLimits(max_abs_vega=50, per_underlying_max_abs_delta=100)
+    # Dollar limits: the -500-share AAPL stock hedge alone is ~-$100,000 of
+    # dollar delta, comfortably past a $50,000 per-underlying cap -- exactly
+    # the kind of cross-underlying-comparable check raw share-count deltas
+    # can't give you (see risk.py's Position.greeks docstring).
+    limits = bscpp.RiskLimits(max_abs_vega=50, per_underlying_max_abs_delta=50_000)
     mgr_with_limits = bscpp.PortfolioRiskManager(limits)
     breaches = mgr_with_limits.check_limits(positions)
 
     print(f"\nLimits: max_abs_vega={limits.max_abs_vega}, "
-          f"per_underlying_max_abs_delta={limits.per_underlying_max_abs_delta}")
+          f"per_underlying_max_abs_delta=${limits.per_underlying_max_abs_delta:,.0f}")
     if breaches:
         print("Breaches:")
         for b in breaches:

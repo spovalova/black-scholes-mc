@@ -17,7 +17,9 @@ def _sample_positions():
 def test_stock_position_greeks_are_pure_delta():
     pos = bscpp.Position("hedge", "stock", quantity=-500, underlying="AAPL", spot=200, rate=0.05)
     g = pos.greeks()
-    assert g["delta"] == -500
+    # dollar delta of a stock position is just its own market value: a
+    # stock's raw delta is always 1, so dollar_delta = 1 * quantity * spot.
+    assert g["delta"] == -500 * 200
     assert g["gamma"] == 0.0 and g["vega"] == 0.0 and g["theta"] == 0.0 and g["rho"] == 0.0
     assert g["price"] == -500 * 200
 
@@ -71,8 +73,12 @@ def test_check_limits_empty_when_no_limits_set():
 
 
 def test_check_limits_empty_when_within_generous_limits():
+    # Net dollar delta for _sample_positions() is ~-96,935 (mostly the
+    # -500-share AAPL stock hedge at spot=200 -> -$100,000 dollar delta,
+    # partly offset by the option legs) -- 200,000 keeps real margin
+    # rather than sitting a coincidental 3% above the actual value.
     positions = _sample_positions()
-    limits = bscpp.RiskLimits(max_abs_delta=100_000, max_abs_vega=100_000, max_abs_gamma=1000,
+    limits = bscpp.RiskLimits(max_abs_delta=200_000, max_abs_vega=100_000, max_abs_gamma=1000,
                                max_abs_theta=100_000)
     mgr = bscpp.PortfolioRiskManager(limits)
     assert mgr.check_limits(positions) == []

@@ -5,6 +5,8 @@
 #include <optional>
 #include <vector>
 
+#include "bscpp/portable_normal.hpp"
+
 namespace bscpp {
 
 namespace {
@@ -63,13 +65,12 @@ std::vector<double> basis_at(double x, int k) {
 std::vector<std::vector<double>> simulate_paths(std::mt19937_64& rng, const MarketInputs& in,
                                                  long num_paths, int num_steps, double drift,
                                                  double diffusion) {
-    std::normal_distribution<double> normal(0.0, 1.0);
     std::vector<std::vector<double>> paths(
         static_cast<size_t>(num_paths), std::vector<double>(static_cast<size_t>(num_steps) + 1));
     for (long p = 0; p < num_paths; ++p) {
         paths[p][0] = in.spot;
         for (int t = 1; t <= num_steps; ++t) {
-            const double z = normal(rng);
+            const double z = standard_normal(rng);
             paths[p][t] = paths[p][t - 1] * std::exp(drift + diffusion * z);
         }
     }

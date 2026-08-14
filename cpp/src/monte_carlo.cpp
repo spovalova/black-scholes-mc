@@ -3,15 +3,16 @@
 #include <algorithm>
 #include <cmath>
 
+#include "bscpp/portable_normal.hpp"
+
 namespace bscpp {
 
 MonteCarloPricer::MonteCarloPricer(std::uint64_t seed) : rng_(seed) {}
 
 std::vector<double> MonteCarloPricer::generate_normals(long n) {
-    std::normal_distribution<double> dist(0.0, 1.0);
     std::vector<double> z(static_cast<size_t>(n));
     for (long i = 0; i < n; ++i) {
-        z[static_cast<size_t>(i)] = dist(rng_);
+        z[static_cast<size_t>(i)] = standard_normal(rng_);
     }
     return z;
 }

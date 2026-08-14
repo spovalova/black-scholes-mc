@@ -197,9 +197,16 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   NaN rather than a silently invented vol.
 
 **Portfolio risk aggregation** (`bscpp.risk`)
-- `PortfolioRiskManager`: net Greeks across multi-underlying `Position`s,
-  grouped by underlying, with configurable `RiskLimits` and breach
-  flagging. This is net-Greeks aggregation with limits, not a production
+- `PortfolioRiskManager`: true DOLLAR delta/gamma (not raw share-equivalent
+  Greeks) across multi-underlying `Position`s, grouped by underlying, with
+  configurable `RiskLimits` and breach flagging. Dollar delta = `delta *
+  quantity * spot`; dollar gamma = `gamma * quantity * spot^2 / 100` (the
+  standard "$ change in dollar delta per 1% move" convention) -- unlike
+  `StrategyPricer`'s raw per-share Greeks (correct there, since one
+  strategy never mixes underlyings), a cross-underlying limit checked in
+  share-equivalent units isn't actually comparable across names of
+  different spot prices, which defeats the point of a portfolio-level
+  limit. This is dollar-Greeks aggregation with limits, not a production
   risk system -- no live feed, margin model, or kill switch.
 
 **Heston stochastic volatility** (`bscpp.heston_price`, `bscpp.backtest.heston_calibration`)

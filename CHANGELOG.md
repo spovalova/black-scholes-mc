@@ -77,6 +77,29 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
 
 ### Fixed
 
+- **Monte Carlo/LSM/Heston-MC seeded reproducibility was platform-
+  dependent.** All three used `std::normal_distribution`, whose exact
+  algorithm the C++ standard leaves implementation-defined -- libstdc++
+  and libc++ produce different variate sequences from the same seed even
+  though `std::mt19937_64` itself is bit-for-bit portable. CI ran on 3
+  OSes and passed only because test tolerances were loose enough to hide
+  the divergence. Replaced with a hand-rolled Box-Muller transform built
+  only from the generator's raw (fully-specified) output and portable
+  arithmetic (`cpp/include/bscpp/portable_normal.hpp`); verified correct
+  (mean/var/skew/kurtosis match a standard normal over 5M draws) and the
+  full test suite (all statistical/convergence tests) passes unchanged.
+- **`bscpp.risk.Position.greeks` computed share-equivalent delta/gamma
+  but called it "dollar Greeks."** 100 shares of raw delta means very
+  different risk on a $20 stock than a $2000 one, so a cross-underlying
+  limit checked in share-equivalent units -- the entire reason this
+  module exists over `StrategyPricer`'s per-share convention -- wasn't
+  actually comparable across names. Now computes true dollar delta
+  (`delta * quantity * spot`) and dollar gamma (`gamma * quantity *
+  spot^2 / 100`, the standard "$ change in dollar delta per 1% move"
+  convention); vega/theta/rho were already correctly dollarized by
+  quantity alone and are unchanged. `RiskLimits` values are now
+  interpreted in dollar terms, not share counts --
+  `portfolio_risk_demo.py`'s example limits updated accordingly.
 - **Vol-clock inconsistency in the validation study**:
   `annualized_realized_vol` scaled trading-day returns by sqrt(365) while
   the backtester accrues calendar-day time -- inflating vol ~20% vs. the
