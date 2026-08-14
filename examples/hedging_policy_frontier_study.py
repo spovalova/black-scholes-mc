@@ -45,6 +45,7 @@ from dotenv import load_dotenv
 
 from bscpp.backtest import PolygonProvider
 from bscpp.backtest.frontier import print_frontier_report, run_policy_grid, score_frontier
+from bscpp.clock import Clock
 
 GRID_OUTPUT_PATH = Path(__file__).parent / "output" / "real_data_grid.csv"
 
@@ -65,17 +66,11 @@ TRANSACTION_COST_BPS = 5.0
 RATE = 0.05
 
 
-def annualized_realized_vol(closes: pd.Series) -> float:
-    """Same calendar-clock estimator as real_data_validation_study.py and
-    gbm_control_experiment.py's trailing-vol arm."""
-    closes = closes.dropna()
-    log_returns = np.log(closes / closes.shift(1)).dropna()
-    if len(log_returns) < 2:
-        return float("nan")
-    elapsed_years = (closes.index[-1] - closes.index[0]).days / 365.0
-    if elapsed_years <= 0:
-        return float("nan")
-    return float(np.sqrt(np.sum(log_returns.to_numpy() ** 2) / elapsed_years))
+# Same calendar clock (ACT/365) as real_data_validation_study.py,
+# gbm_control_experiment.py's trailing-vol arm, and HedgingBacktester's
+# default -- see bscpp.clock.Clock.
+CLOCK = Clock()
+annualized_realized_vol = CLOCK.annualized_realized_vol
 
 
 def collect_windows(provider: PolygonProvider, ticker: str) -> list[dict]:

@@ -12,11 +12,8 @@ import pandas as pd
 
 import bscpp
 from bscpp.backtest.data_provider import DataProvider
+from bscpp.clock import Clock
 from bscpp.curve import resolve_rate
-
-
-def _time_to_expiry_years(expiration: dt.date, as_of: dt.date) -> float:
-    return max((expiration - as_of).days, 0) / 365.0
 
 
 def extract_forward_and_carry(chain: pd.DataFrame, spot: float, t_years: float,
@@ -72,6 +69,7 @@ class StripPricer:
         mc_paths: int = 50_000,
         mc_seed: int = 42,
         american: bool = False,
+        clock: Clock = Clock(),
     ):
         """rate: a bare float (flat rate) or a bscpp.ZeroCurve -- resolved
         to the scalar rate at this chain's own maturity in price_strip.
@@ -95,6 +93,10 @@ class StripPricer:
         values at whichever IV was solved either way -- CRR has no
         closed-form Greeks, so this is an explicit approximation in
         american mode, not exact American sensitivities.
+
+        clock: the day-count convention (see bscpp.clock.Clock) for
+        time-to-expiry. Defaults to ACT/365 (calendar days), matching the
+        convention every other pricer/hedger in this project uses.
         """
         self.provider = provider
         self.rate = rate
@@ -102,6 +104,7 @@ class StripPricer:
         self.mc_paths = mc_paths
         self.mc = bscpp.MonteCarloPricer(seed=mc_seed)
         self.american = american
+        self.clock = clock
 
     def price_strip(
         self,
@@ -130,7 +133,7 @@ class StripPricer:
         if chain.empty:
             return chain
 
-        t_years = _time_to_expiry_years(expiration, as_of)
+        t_years = self.clock.time_to_expiry(as_of, expiration)
         if t_years <= 0:
             raise ValueError(f"expiration {expiration} is not after as_of {as_of}")
         rate = resolve_rate(self.rate, t_years)

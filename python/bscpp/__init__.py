@@ -29,6 +29,7 @@ from bscpp._core import (
     heston_price_batch,
     heston_satisfies_feller_condition,
 )
+from bscpp.clock import Clock
 from bscpp.curve import ZeroCurve, resolve_rate
 from bscpp.risk import Breach, Position, PortfolioRiskManager, RiskLimits
 from bscpp.strategies import (
@@ -87,6 +88,7 @@ __all__ = [
     "RiskLimits",
     "ZeroCurve",
     "resolve_rate",
+    "Clock",
 ]
 
 

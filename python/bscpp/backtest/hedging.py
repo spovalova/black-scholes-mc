@@ -32,6 +32,7 @@ import pandas as pd
 
 import bscpp
 from bscpp.backtest.policies import DeltaPolicy, HedgeState
+from bscpp.clock import Clock
 from bscpp.curve import resolve_rate
 
 
@@ -49,7 +50,8 @@ class HedgingBacktester:
     single-name equity; illiquid names or wide markets would need more.
     """
 
-    def __init__(self, rate, dividend_yield: float = 0.0, transaction_cost_bps: float = 0.0):
+    def __init__(self, rate, dividend_yield: float = 0.0, transaction_cost_bps: float = 0.0,
+                 clock: Clock = Clock()):
         """rate: a bare float (flat rate) or a bscpp.ZeroCurve. Resolved to
         the scalar rate at the option's OWN remaining maturity at each
         step (via bscpp.curve.resolve_rate) -- both for pricing the
@@ -57,10 +59,19 @@ class HedgingBacktester:
         Using the option-maturity rate for financing too is a deliberate
         simplification (a real desk separates repo/overnight financing
         from the option's own discount rate); a genuine short-end curve
-        is out of scope here, see the README's scope statement."""
+        is out of scope here, see the README's scope statement.
+
+        clock: the day-count convention (see bscpp.clock.Clock) for every
+        time-to-expiry and every step's elapsed time. Defaults to ACT/365
+        (calendar days) -- theta and financing accrue in calendar time
+        (an option loses value over a weekend even though nothing
+        trades), so this is the convention every other pricer/hedger in
+        this project uses too, not an independent choice per class.
+        """
         self.rate = rate
         self.dividend_yield = dividend_yield
         self.transaction_cost_bps = transaction_cost_bps
+        self.clock = clock
 
     def run(
         self,
@@ -113,7 +124,7 @@ class HedgingBacktester:
 
         spot0 = float(price_path.iloc[0])
         vol0 = float(vols.iloc[0])
-        t0 = max((expiration - dates[0].date()).days, 1) / 365.0
+        t0 = self.clock.time_to_expiry(dates[0].date(), expiration, floor_at_one_day=True)
         rate0 = resolve_rate(self.rate, t0)
         inputs0 = bscpp.make_inputs(spot0, strike, rate0, vol0, t0, option_type,
                                      self.dividend_yield)
@@ -140,9 +151,8 @@ class HedgingBacktester:
             date = dates[i]
             spot = float(price_path.iloc[i])
             vol = float(vols.iloc[i])
-            elapsed_days = (dates[i] - dates[i - 1]).days or 1
-            dt_years = elapsed_days / 365.0
-            t = max((expiration - date.date()).days, 0) / 365.0
+            dt_years = self.clock.elapsed(dates[i - 1], dates[i], floor_at_one_day=True)
+            t = self.clock.time_to_expiry(date.date(), expiration)
             # Financing accrues over this step at the rate for the OPTION'S
             # remaining maturity as of this step (not a separate overnight/
             # repo rate -- see __init__'s docstring for why that's a
@@ -260,8 +270,8 @@ class HedgingBacktester:
         has_shares = "shares" in df and "delta" in df
 
         for i in range(1, n):
-            elapsed_days = (df["date"].iat[i] - df["date"].iat[i - 1]).days or 1
-            dt_years = elapsed_days / 365.0
+            dt_years = self.clock.elapsed(df["date"].iat[i - 1], df["date"].iat[i],
+                                           floor_at_one_day=True)
             realized[i] = df["portfolio_value"].iat[i] - df["portfolio_value"].iat[i - 1]
             # Same rate resolution as run(): the option's own remaining
             # maturity as of the END of this step (falling back to the

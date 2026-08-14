@@ -183,6 +183,26 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
   caller. See `examples/real_data_hedging_demo.py` for an end-to-end
   multi-pillar curve, not just a unit test of the class in isolation.
 
+**Day-count clock** (`bscpp.clock.Clock`)
+- One explicit day-count convention -- `ACT/365` (calendar days, default)
+  or `TRADING/252` -- instead of `365`/`252` appearing as an unexamined
+  magic number at each call site. `year_fraction`, `time_to_expiry`,
+  `elapsed` (a floored-at-one-day step length), and
+  `annualized_realized_vol` all go through it; `StripPricer` and
+  `HedgingBacktester` both take a `clock=` parameter (defaulting to
+  `Clock()`, i.e. ACT/365) instead of computing day-counts inline.
+  Concrete motivation, not a hypothetical: this project's own history has
+  a real bug where a validation study scaled trading-day returns by
+  `sqrt(365)` while the backtester it was validating accrued calendar
+  time, inflating a reported result ~20% (see CHANGELOG's "vol-clock
+  inconsistency" fix) -- exactly the class of bug one shared, explicit
+  clock is meant to structurally prevent. The three example scripts that
+  each hand-rolled their own (duplicated, previously drift-prone)
+  realized-vol estimator now call `Clock().annualized_realized_vol`
+  instead -- confirmed bit-for-bit identical to the old formula before
+  the swap (`test_clock.py`), so none of the already-published research
+  numbers changed.
+
 **Multi-leg strategies** (`bscpp.strategies`)
 - `straddle`, `strangle`, `vertical_spread`, `butterfly`, `strip` (long 1
   call + 2 puts, bearish-biased), `strap` (long 2 calls + 1 put,

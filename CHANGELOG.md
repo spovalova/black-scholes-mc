@@ -62,6 +62,27 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
 
 ### Added
 
+- **`bscpp.clock.Clock`**: one explicit day-count convention (`ACT/365`
+  default, `TRADING/252` available) instead of `365`/`252` as an
+  unexamined magic number scattered per call site. `year_fraction`,
+  `time_to_expiry`, `elapsed` (floored-at-one-day step length), and
+  `annualized_realized_vol` all route through it. `StripPricer` and
+  `HedgingBacktester` (`run` and `attribute_pnl`, kept consistent so the
+  exact P&L-decomposition accounting identity still holds) both take a
+  `clock=` parameter instead of inline day-count arithmetic. Replaced 3
+  duplicated hand-rolled `annualized_realized_vol` implementations
+  (`hedging_policy_frontier_study.py`, `gbm_control_experiment.py`,
+  `real_data_validation_study.py`) with `Clock().annualized_realized_vol`
+  -- confirmed bit-for-bit identical to the old formula before swapping
+  (`test_annualized_realized_vol_matches_original_inline_formula_
+  exactly`), and reran `gbm_control_experiment.py` after the swap to
+  confirm byte-identical output, so none of Stage 1's already-published
+  numbers (see README's "Research finding") changed. Motivated by a real
+  incident, not a hypothetical: this project once had exactly the bug a
+  shared, explicit clock is meant to prevent (a validation study scaling
+  trading-day returns by `sqrt(365)` while the backtester it validated
+  accrued calendar time, inflating a result ~20% -- see the "Vol-clock
+  inconsistency" entry below). 9 new tests (`test_clock.py`).
 - **`bscpp.crr_price`/`crr_implied_vol`/`price_american_crr`**: dividend-
   aware Cox-Ross-Rubinstein binomial tree, now this project's production
   American pricer -- deterministic, ~14us/price at num_steps=200 (matches

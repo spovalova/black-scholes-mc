@@ -25,6 +25,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from bscpp.backtest import HedgingBacktester, PolygonProvider
+from bscpp.clock import Clock
 from bscpp.stats import dependent_correlation_ci, effective_sample_size
 
 TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "SPY"]
@@ -32,26 +33,14 @@ LOOKBACK_DAYS = 420  # calendar days of history to pull per ticker
 WINDOW_DAYS = 45  # length of each hedging window (and of the trailing vol lookback)
 STRIDE_DAYS = 20  # step between window starts (overlapping windows, more data points)
 
-
-def annualized_realized_vol(closes: pd.Series) -> float:
-    """Annualized realized vol on the CALENDAR clock (ACT/365).
-
-    The hedging backtester accrues time as calendar days / 365 (a weekend
-    gap counts as 3 days of theta and financing), so the vol estimate must
-    use the same clock: realized variance per year = sum of squared log
-    returns divided by total elapsed CALENDAR time in years. An earlier
-    version scaled trading-day return std by sqrt(365) -- silently mixing
-    the trading-day and calendar-day conventions and inflating vol ~20%
-    relative to the usual sqrt(252) estimate.
-    """
-    closes = closes.dropna()
-    log_returns = np.log(closes / closes.shift(1)).dropna()
-    if len(log_returns) < 2:
-        return float("nan")
-    elapsed_years = (closes.index[-1] - closes.index[0]).days / 365.0
-    if elapsed_years <= 0:
-        return float("nan")
-    return float(np.sqrt(np.sum(log_returns.to_numpy() ** 2) / elapsed_years))
+# ACT/365 (calendar clock), matching HedgingBacktester's default: it accrues
+# time as calendar days (a weekend gap counts as 3 days of theta and
+# financing), so the vol estimate must use the same clock. An earlier
+# version scaled trading-day return std by sqrt(365) -- silently mixing the
+# trading-day and calendar-day conventions and inflating vol ~20% relative
+# to the usual sqrt(252) estimate. See bscpp.clock.Clock.
+CLOCK = Clock()
+annualized_realized_vol = CLOCK.annualized_realized_vol
 
 
 def run_ticker(provider: PolygonProvider, ticker: str, rate: float) -> list[dict]:

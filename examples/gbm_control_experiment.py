@@ -53,6 +53,7 @@ import numpy as np
 import pandas as pd
 
 from bscpp.backtest.frontier import print_frontier_report, run_policy_grid, score_frontier
+from bscpp.clock import Clock
 
 GRID_OUTPUT_DIR = Path(__file__).parent / "output"
 
@@ -70,18 +71,12 @@ SPOT0 = 100.0
 SEED = 20260813
 
 
-def _annualized_realized_vol(closes: pd.Series) -> float:
-    """Identical estimator to hedging_policy_frontier_study.py's
-    annualized_realized_vol: calendar-clock, matching the backtester's own
-    clock exactly (see that module and the CHANGELOG fix history)."""
-    closes = closes.dropna()
-    log_returns = np.log(closes / closes.shift(1)).dropna()
-    if len(log_returns) < 2:
-        return float("nan")
-    elapsed_years = (closes.index[-1] - closes.index[0]).days / 365.0
-    if elapsed_years <= 0:
-        return float("nan")
-    return float(np.sqrt(np.sum(log_returns.to_numpy() ** 2) / elapsed_years))
+# Identical estimator to hedging_policy_frontier_study.py's
+# annualized_realized_vol: calendar clock (ACT/365), matching
+# HedgingBacktester's own default clock exactly -- see bscpp.clock.Clock
+# and the CHANGELOG fix history.
+_CLOCK = Clock()
+_annualized_realized_vol = _CLOCK.annualized_realized_vol
 
 
 def simulate_gbm_windows(vol_levels, paths_per_vol, seed) -> list[dict]:
