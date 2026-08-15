@@ -8,6 +8,7 @@ version = "0.2.0"
 description = "Black-Scholes and Monte Carlo options pricing (C++ core) with a Python backtesting interface"
 license = {file = "LICENSE"}
 requires-python = ">=3.9"
+classifiers = ["Typing :: Typed"]
 dependencies = [
     "numpy>=1.24",
     "pandas>=2.0",
@@ -23,3 +24,45 @@ benchmark = ["QuantLib>=1.30", "py_vollib>=1.0", "pytest-benchmark>=4.0"]
 
 [tool.setuptools.packages.find]
 where = ["python"]
+
+[tool.setuptools.package-data]
+# py.typed (PEP 561): declares this package's type hints authoritative,
+# not just best-effort inference. _core.pyi: hand-verified stubs for the
+# compiled pybind11 extension (bscpp._core has no Python source of its
+# own for a type checker to introspect) -- generated via pybind11-
+# stubgen, then fixed by hand where it surfaced a real issue (see the
+# comment on MarketInputs.__init__ in _core.pyi): the C++ binding
+# declares dividend_yield's default before vol/maturity's required
+# params, valid for pybind11's own keyword matching but not valid
+# Python stub syntax as literally generated -- mypy caught this
+# immediately (a "parameter without default follows parameter with
+# default" syntax error), confirming the stub was actually exercised
+# against a real type checker before being trusted, not just generated
+# and shipped.
+bscpp = ["py.typed", "_core.pyi"]
+
+[tool.cibuildwheel]
+# CPython 3.10-3.12, matching ci.yml's own test matrix -- no point
+# building wheels for versions this project doesn't already test against.
+build = "cp310-* cp311-* cp312-*"
+# musllinux and 32-bit builds aren't tested anywhere in this project;
+# skipping rather than shipping an unverified wheel.
+skip = "*-musllinux* *_i686 *-win32"
+test-requires = ["pytest>=7.4", "numpy>=1.24", "pandas>=2.0", "scipy>=1.10", "requests>=2.31",
+                  "python-dotenv>=1.0"]
+test-command = "pytest {project}/tests -q -m \"not slow\""
+
+[tool.cibuildwheel.macos]
+# BSCPP_SKIP_OPENMP forces setup.py to build without OpenMP here,
+# regardless of whether libomp happens to be present on the build host --
+# see setup.py's _openmp_supported for why this needed to be explicit
+# rather than left to implicit detection: a locally-built Homebrew libomp
+# can target a NEWER macOS minimum than the wheel itself declares (hit
+# this directly running cibuildwheel locally -- delocate refused to
+# bundle a libomp targeting 15.0 into an 11.0-declared wheel), and
+# whether a FRESH CI runner even has libomp installed is host state this
+# project doesn't control. Distributed macOS wheels build single-
+# threaded but portable; `pip install` from source with your own
+# `brew install libomp` still gets the parallel path exactly as before
+# this workflow existed.
+environment = { BSCPP_SKIP_OPENMP = "1" }

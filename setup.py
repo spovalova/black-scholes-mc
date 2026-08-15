@@ -48,7 +48,23 @@ def _openmp_supported(compiler):
     are silently ignored (a no-op, not a compile error) wherever OpenMP
     isn't actually enabled, so skipping it here costs parallelism, not
     correctness.
+
+    BSCPP_SKIP_OPENMP=1 forces this to report unsupported regardless of
+    what's actually on the build host -- specifically for cibuildwheel's
+    macOS wheel builds (see pyproject.toml's [tool.cibuildwheel.macos]):
+    a locally-built Homebrew libomp bundled into a wheel via delocate can
+    target a NEWER macOS minimum than the wheel itself claims (observed:
+    libomp targeting 15.0 inside a wheel declared compatible with 11.0,
+    which delocate correctly refuses to ship) -- caught by actually
+    running cibuildwheel locally before trusting this config, not
+    assumed to work from the YAML alone. Whether a fresh CI runner even
+    has libomp installed is host-state this project doesn't control cross-
+    OS, so wheel builds pin the answer explicitly instead of depending on
+    it. `pip install` from source is unaffected -- OpenMP still gets
+    detected and used there exactly as before.
     """
+    if os.environ.get("BSCPP_SKIP_OPENMP") == "1":
+        return False, [], []
     compile_args, link_args = _openmp_candidate_flags()
     if not compile_args:
         return False, [], []

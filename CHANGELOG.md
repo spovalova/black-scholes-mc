@@ -523,6 +523,40 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
     feasible`); the full fit recovers a known smile to the same bar
     `fit_svi_slice` is held to; and a well-behaved fit passes
     `svi_gatheral_jacquier_check` (`test_vol_surface.py`).
+- **Type stubs, `py.typed`, and wheel-building infrastructure** (new).
+  - `python/bscpp/py.typed` (PEP 561) plus hand-verified
+    `python/bscpp/_core.pyi` for the compiled pybind11 extension (no
+    Python source of its own for a type checker to read otherwise).
+    Generated via `pybind11-stubgen`, then checked against `mypy --strict`
+    before being trusted, not shipped as generated -- which caught a real
+    issue: the generated stub for `MarketInputs.__init__` was invalid
+    Python syntax (a required parameter following a defaulted one,
+    mirroring the C++ binding's own declared argument order in
+    `bindings.cpp` -- valid for pybind11's runtime keyword matching, not
+    for a Python `def`). Fixed by marking the trailing parameters
+    keyword-only in the stub, matching how this constructor is actually
+    called everywhere in this codebase already (`bscpp.make_inputs`,
+    always by keyword past `rate`). `pyproject.toml` gained
+    `[tool.setuptools.package-data]` so both files actually ship in built
+    wheels/sdists -- confirmed by building both and inspecting their
+    contents, not assumed from the config alone.
+  - `.github/workflows/wheels.yml` (new): builds wheels via `cibuildwheel`
+    (Linux/macOS/Windows, CPython 3.10-3.12) on version tags or manual
+    dispatch, uploaded as build artifacts only -- deliberately not wired
+    to publish anywhere, a separate decision this workflow doesn't make.
+    Running `cibuildwheel` locally before trusting the config (rather
+    than assuming the YAML was correct) found a real, concrete failure:
+    a Homebrew-built `libomp` on the build host targeted macOS 15.0,
+    newer than the arm64 wheel's declared 11.0 minimum, so `delocate`
+    (which bundles the dylib into the wheel) correctly refused to ship
+    it. Rather than chase a Homebrew-version-dependent fix, added
+    `BSCPP_SKIP_OPENMP=1` (`setup.py`) to make wheel builds independent
+    of whatever happens to be on the build host -- distributed macOS
+    wheels build single-threaded but portable; `pip install` from source
+    with `brew install libomp` is unaffected. Verified end-to-end after
+    the fix: a wheel built this way installs into a fresh venv and passes
+    the full non-slow test suite (136 tests) against the installed
+    package itself, not just the dev environment.
 
 ### Fixed
 

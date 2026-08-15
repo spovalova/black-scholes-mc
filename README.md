@@ -660,6 +660,43 @@ pip install -e .
 pytest tests/ -q -m "not slow"   # fast suite, ~15s
 ```
 
+**Type stubs / PEP 561**: `bscpp` ships `py.typed` plus hand-verified
+`.pyi` stubs for the compiled `bscpp._core` extension (a pybind11 module
+has no Python source of its own for a type checker to read), so
+`mypy`/`pyright` see real signatures, not `Any`, for every C++-bound
+call. The stubs are generated via `pybind11-stubgen` -- verify (don't
+just regenerate and trust) after touching `cpp/src/bindings.cpp`:
+
+```bash
+pip install pybind11-stubgen mypy
+pybind11-stubgen bscpp._core -o python --enum-class-locations "OptionType:bscpp._core"
+mypy --strict your_test_script.py   # or any script exercising the changed API
+```
+
+This caught a real issue once already, not a hypothetical: the generated
+stub for `MarketInputs.__init__` was invalid Python syntax (a required
+parameter following a defaulted one, matching the C++ binding's own
+declared order in `bindings.cpp` -- valid for pybind11's own keyword
+matching, not for a Python `def`), caught immediately by `mypy` and fixed
+by hand in `python/bscpp/_core.pyi` (see the comment there).
+
+**Wheels**: `.github/workflows/wheels.yml` builds wheels via
+`cibuildwheel` (Linux/macOS/Windows, CPython 3.10-3.12, config in
+`pyproject.toml`'s `[tool.cibuildwheel]`) on version tags or manual
+dispatch, uploaded as build artifacts -- **not** published anywhere
+automatically; that's a separate decision with its own trigger, not
+bundled into this workflow. macOS wheels build without OpenMP
+(`BSCPP_SKIP_OPENMP=1`, see `setup.py`): running `cibuildwheel` locally
+before trusting the config found a real, concrete failure -- a locally-
+built Homebrew `libomp` targeted a newer macOS minimum (15.0) than the
+wheel itself declares (11.0), which `delocate` correctly refused to
+bundle. Rather than chase a Homebrew-version-dependent fix, distributed
+macOS wheels skip OpenMP entirely (single-threaded, still correct);
+`pip install` from source with your own `brew install libomp` is
+unaffected. Verified end-to-end, not just configured: a wheel built this
+way installs cleanly into a fresh venv and passes the full non-slow test
+suite against the installed package, not just the dev environment.
+
 ## Run the demos (no API key needed)
 
 ```bash

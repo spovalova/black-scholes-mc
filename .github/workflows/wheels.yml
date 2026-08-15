@@ -1,0 +1,60 @@
+name: Build wheels
+
+# Build-and-upload-as-artifact only -- deliberately NOT wired to publish
+# anywhere (PyPI or otherwise). Publishing registers a public package
+# name and is a separate decision this workflow doesn't make on its own;
+# add a publish step explicitly, with its own trigger, if that's wanted.
+#
+# Triggers: version tags (v*, e.g. a real release) and manual dispatch
+# (for testing the build itself without cutting a tag) -- not on every
+# push/PR, since building wheels across 3 OSes x 3 Python versions is
+# slow and this project's normal CI (ci.yml) already verifies correctness
+# from source on every change.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build_wheels:
+    name: wheels / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v4
+        # Build config (which Python versions, which platforms skipped,
+        # the smoke-test command run against each built wheel) lives in
+        # pyproject.toml's [tool.cibuildwheel] section -- one source of
+        # truth, not duplicated here.
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: ./wheelhouse/*.whl
+
+  build_sdist:
+    name: source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --sdist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: ./dist/*.tar.gz
