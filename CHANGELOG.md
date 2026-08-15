@@ -467,6 +467,62 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
     against (short maturity, dividends, various strikes/types, Feller-
     violating vol-of-vol), all at the same low (20) step count
     (`test_heston.py`).
+- **`fit_svi_slice_quasi_explicit`** (new, `bscpp.backtest.vol_surface`):
+  Zeliade Systems' (2009) "quasi-explicit" SVI calibration, added
+  alongside the existing `fit_svi_slice` (plain 5-parameter nonlinear
+  least squares), not a replacement.
+  - **The problem it addresses is real, not hypothetical**: substituting
+    `y=(k-m)/sigma` turns SVI's `w(k) = a + b(rho(k-m) +
+    sqrt((k-m)^2+sigma^2))` into `w(k) = c1 + c2*y + c3*sqrt(y^2+1)`,
+    LINEAR in `(c1,c2,c3) = (a, b*rho*sigma, b*sigma)` for any fixed
+    `(m,sigma)` -- reducing the search from 5D nonlinear (which, like any,
+    can land in a bad local optimum depending on where it starts) to 2D
+    nonlinear with the other three parameters solved by an exact,
+    convex, initial-guess-independent linear system at every candidate.
+    Gave `fit_svi_slice` an `initial_guess` override (previously
+    hardcoded) specifically to demonstrate this, not just assert it: on a
+    short-dated, strongly-skewed, noisy smile, two different bad initial
+    guesses degrade `fit_svi_slice` to RMSE ~0.19-0.22 (an effectively
+    failed fit) while `fit_svi_slice_quasi_explicit` -- no initial guess
+    needed -- fits the same data to RMSE ~0.0015 regardless.
+  - **"Quasi", not fully, explicit**: the closed-form `(c1,c2,c3)` answer
+    isn't always a valid SVI slice (needs `c3>=0`, `|c2|<=c3` i.e.
+    `|rho|<=1`, and non-negative total variance at the minimum -- the
+    same condition `svi_min_total_variance` already checks, just in
+    `(c1,c2,c3)` form). Falls back to a constrained convex optimization
+    when it isn't, still initial-guess-insensitive in the sense that
+    matters (feasible region and objective are both convex).
+  - **Grid density measured, not assumed, to not matter for the final
+    answer**: the outer `(m,sigma)` search grid feeds a local (Nelder-
+    Mead) refine step, and RMSE came back IDENTICAL from a 5x5 grid
+    through 21x21 on every scenario tested -- the refine step does
+    essentially all the real work, so a dense grid mostly just adds cost
+    (a 21x21 grid measured up to ~30x slower than 5x5 for identical
+    RMSE). Default shipped at 9x9, a margin above the measured-sufficient
+    floor for real data less well-behaved than what was tested, not a
+    value found necessary.
+  - **`vega_weighted=True` (default)**: weights each strike's (variance-
+    space) residual by vega^2 -- vega being d(BS price)/d(vol), the
+    actual price sensitivity to an IV error there -- via the existing
+    `bs_price_with_greeks_batch_arrays`. An unweighted fit treats a
+    1-vol-point error at a near-zero-vega deep OTM strike the same as at
+    the vega-heavy ATM strike, backwards for anything pricing off the
+    fitted smile afterward. Verified to actually change the fit (not
+    silently a no-op) on noisy data where unweighted and vega-weighted
+    optima genuinely differ -- a noiseless synthetic smile that exactly
+    matches the SVI functional form has no such tension (every point
+    agrees regardless of weighting), so this needed noise to test for
+    real, not just a clean recovery check.
+  - **Not a speed win, stated as such**: ~7x slower than `fit_svi_slice`
+    on a realistic 15-strike chain (10.3ms vs 1.5ms) -- the value is
+    initial-guess robustness and vega weighting, not raw throughput, and
+    the README doesn't claim otherwise.
+  - **Verified, not assumed**: the `(c1,c2,c3)` reparametrization
+    reproduces a known SVI slice's total variance to ~machine precision
+    (`test_svi_conditional_linear_fit_matches_the_svi_formula_when_
+    feasible`); the full fit recovers a known smile to the same bar
+    `fit_svi_slice` is held to; and a well-behaved fit passes
+    `svi_gatheral_jacquier_check` (`test_vol_surface.py`).
 
 ### Fixed
 

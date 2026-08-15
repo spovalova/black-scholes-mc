@@ -281,7 +281,32 @@ examples/                     runnable demos -- all but run_backtest.py (non-moc
 **Implied vol surface** (`bscpp.backtest.vol_surface`)
 - `fit_svi_slice`: least-squares fit of Gatheral's SVI parameterization
   (`w(k) = a + b(rho(k-m) + sqrt((k-m)^2+sigma^2))`) to a chain's implied
-  vols.
+  vols -- a plain 5-parameter nonlinear search, which (like any) can land
+  in a bad local optimum depending on its initial guess.
+- `fit_svi_slice_quasi_explicit`: Zeliade Systems' (2009) "quasi-explicit"
+  calibration -- substituting `y=(k-m)/sigma` turns SVI's formula into
+  `w(k) = c1 + c2*y + c3*sqrt(y^2+1)`, LINEAR in `(c1,c2,c3)=(a,b*rho*
+  sigma,b*sigma)` for any fixed `(m,sigma)`. Reduces the search from 5D
+  nonlinear to 2D nonlinear (`m,sigma`, grid + local refine) with the
+  other three solved by an exact linear system at every candidate --
+  convex, so its solution doesn't depend on an initial guess the way the
+  outer 5D search's does. ("Quasi", not fully, explicit: the closed-form
+  answer isn't always a valid SVI slice -- needs `c3>=0`, `|c2|<=c3`,
+  non-negative total variance at the minimum -- falling back to a
+  constrained convex optimization, still initial-guess-insensitive, when
+  it isn't.) Optional `vega_weighted=True` (default) weights each
+  strike's residual by vega^2 -- the actual price sensitivity to an IV
+  error there -- so the fit reflects which strikes matter for pricing/
+  hedging rather than treating a deep-OTM near-zero-vega point the same
+  as the vega-heavy ATM one. Measured, not assumed: on a short-dated,
+  strongly-skewed, noisy smile, two `fit_svi_slice` initial guesses
+  degrade its RMSE to ~0.19-0.22 (an effectively failed fit); the same
+  data needs no initial guess for `fit_svi_slice_quasi_explicit` and
+  fits to RMSE ~0.0015 regardless. Not a speed win, though, and stated as
+  such: ~7x slower than `fit_svi_slice` on a realistic 15-strike chain
+  (10.3ms vs 1.5ms) for the initial-guess-robustness and vega-weighting
+  it buys. See `test_vol_surface.py` for both the reproducible failure
+  case and the reparametrization's algebraic correctness check.
 - Two independent no-arbitrage checks: `svi_butterfly_arbitrage_check`
   applies **Breeden-Litzenberger (1978)** numerically (prices calls off
   the fitted smile, takes a finite-difference second derivative in

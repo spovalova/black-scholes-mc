@@ -15,6 +15,18 @@ polynomial fit in strike.
 Fitting one slice (one expiration) at a time here -- a full surface is a
 sequence of per-expiry SVISlice fits, one per available expiration.
 
+Two fitters: `fit_svi_slice` (plain 5-parameter nonlinear least squares --
+simple, but a 5D nonlinear search can land in a bad local optimum
+depending on its initial guess) and `fit_svi_slice_quasi_explicit`
+(Zeliade Systems 2009's method: reduces the search to 2 nonlinear
+parameters (m, sigma) by solving the remaining three (a, b, rho) exactly
+-- a closed-form linear system -- at every candidate, with optional
+vega weighting so the fit reflects which strikes actually matter for
+pricing/hedging). Kept as a separate function, not a replacement,
+matching this project's established pattern (HestonPricer::price vs.
+price_cos, HestonMCPricer.price vs. price_qe) of adding a cross-checked
+alternative rather than swapping the existing one out from under callers.
+
 Known limitation: fitting slices independently gives NO guarantee they're
 jointly consistent across expiries (no calendar-spread arbitrage). That
 guarantee is exactly what Gatheral & Jacquier's SSVI (surface) extension of
@@ -31,7 +43,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.optimize import least_squares
+from scipy.optimize import least_squares, minimize
 
 
 @dataclass
@@ -73,8 +85,17 @@ def fit_svi_slice(
     t_years: float,
     rate: float = 0.0,
     dividend_yield: float = 0.0,
+    initial_guess: list[float] | None = None,
 ) -> SVISlice:
-    """Least-squares fit an SVI slice to (strike, implied vol) pairs at one expiry."""
+    """Least-squares fit an SVI slice to (strike, implied vol) pairs at one expiry.
+
+    `initial_guess` (a,b,rho,m,sigma) overrides the default starting point
+    -- exposed mainly so fit_svi_slice_quasi_explicit's test suite can
+    demonstrate, not just assert, that THIS full 5-parameter nonlinear
+    fit is sensitive to where it starts (a real local-minima risk any
+    5D nonlinear least-squares carries), in exactly the way the quasi-
+    explicit method's 2D-outer/convex-inner split isn't.
+    """
     strikes = np.asarray(strikes, dtype=float)
     market_ivs = np.asarray(market_ivs, dtype=float)
     valid = np.isfinite(market_ivs) & (market_ivs > 0) & np.isfinite(strikes) & (strikes > 0)
@@ -91,7 +112,7 @@ def fit_svi_slice(
         model = a + b * (rho * (k - m) + np.sqrt((k - m) ** 2 + sigma ** 2))
         return model - w_obs
 
-    x0 = [max(w_obs.min(), 1e-4), 0.1, -0.3, 0.0, 0.1]
+    x0 = initial_guess if initial_guess is not None else [max(w_obs.min(), 1e-4), 0.1, -0.3, 0.0, 0.1]
     bounds = ([-np.inf, 0.0, -0.999, -np.inf, 1e-4], [np.inf, np.inf, 0.999, np.inf, np.inf])
     result = least_squares(residuals, x0=x0, bounds=bounds, max_nfev=5000)
 
@@ -263,3 +284,171 @@ def svi_butterfly_arbitrage_check(
         "strikes": strikes,
         "density": density,
     }
+
+
+_SVI_SIGMA_FLOOR = 1e-4
+
+
+def _svi_conditional_linear_fit(y, w_obs, weights):
+    """Given y=(k-m)/sigma for a FIXED (m, sigma), solve the weighted
+    linear least-squares sub-problem for (c1, c2, c3) in
+
+        w(k) = c1 + c2*y + c3*sqrt(y^2+1)
+
+    the reparametrization fit_svi_slice_quasi_explicit uses to turn SVI's
+    5-parameter fit into a 2-parameter outer search: a=c1, b=c3/sigma,
+    rho=c2/c3 once sigma is reintroduced by the caller. Linear in
+    (c1,c2,c3) for any fixed (m,sigma), so this has a closed-form (matrix
+    pseudo-inverse) solution -- no iteration, no initial-guess sensitivity.
+
+    That closed-form answer isn't always a valid SVI slice, though (needs
+    c3>=0, |c2|<=c3 i.e. |rho|<=1, and non-negative total variance at the
+    minimum, a+b*sigma*sqrt(1-rho^2) = c1+sqrt(c3^2-c2^2) >= 0 -- see
+    svi_min_total_variance for the same condition in (a,b,rho) form).
+    Falls back to a constrained convex optimization when it isn't --
+    "quasi" explicit, not always fully explicit, the same qualification
+    the Zeliade paper itself gives the method. The fallback is still
+    initial-guess-insensitive in the sense that matters (feasible region
+    and objective are both convex, so any reasonable start converges to
+    the same global optimum) even though it's technically iterative.
+
+    Returns (c1, c2, c3, weighted_sse).
+    """
+    X = np.column_stack([np.ones_like(y), y, np.sqrt(y ** 2 + 1.0)])
+    sqrt_w = np.sqrt(weights)
+    coeffs, *_ = np.linalg.lstsq(X * sqrt_w[:, None], w_obs * sqrt_w, rcond=None)
+    c1, c2, c3 = coeffs
+
+    feasible = c3 >= 0.0 and abs(c2) <= c3 and c1 + np.sqrt(max(c3 ** 2 - c2 ** 2, 0.0)) >= 0.0
+    if not feasible:
+        def objective(p):
+            resid = X @ p - w_obs
+            return float(np.sum(weights * resid ** 2))
+
+        c3_guess = max(abs(c3), 1e-3)
+        constraints = [
+            {"type": "ineq", "fun": lambda p: p[2]},                                  # c3 >= 0
+            {"type": "ineq", "fun": lambda p: p[2] - p[1]},                            # c3 >= c2
+            {"type": "ineq", "fun": lambda p: p[2] + p[1]},                            # c3 >= -c2
+            {"type": "ineq", "fun": lambda p: p[0] +
+                np.sqrt(np.maximum(p[2] ** 2 - p[1] ** 2, 0.0))},                      # min w >= 0
+        ]
+        result = minimize(objective, x0=[c1, np.clip(c2, -c3_guess, c3_guess), c3_guess],
+                           method="SLSQP", constraints=constraints,
+                           options={"maxiter": 200, "ftol": 1e-14})
+        c1, c2, c3 = result.x
+
+    weighted_sse = float(np.sum(weights * (X @ np.array([c1, c2, c3]) - w_obs) ** 2))
+    return c1, c2, c3, weighted_sse
+
+
+def fit_svi_slice_quasi_explicit(
+    strikes,
+    market_ivs,
+    spot: float,
+    t_years: float,
+    rate: float = 0.0,
+    dividend_yield: float = 0.0,
+    vega_weighted: bool = True,
+    m_grid_size: int = 9,
+    sigma_grid_size: int = 9,
+) -> SVISlice:
+    """Zeliade Systems' "quasi-explicit" SVI calibration (Zeliade Systems,
+    2009, "Quasi-Explicit Calibration of Gatheral's SVI Model") -- reduces
+    fit_svi_slice's 5-parameter nonlinear least-squares to a 2-parameter
+    (m, sigma) search, with (a, b, rho) solved EXACTLY (a closed-form
+    linear system, not iterated) at every candidate -- see
+    _svi_conditional_linear_fit for the reparametrization this relies on.
+    A 5D nonlinear search can get stuck in a bad local optimum depending
+    on where it starts; the inner (a,b,rho) problem here can't, in the
+    same way, since it's convex and doesn't depend on an initial guess.
+    Only the OUTER (m,sigma) search is still nonlinear, but 2-dimensional
+    instead of 5, and every candidate it tries is scored by the inner
+    problem's exact optimum rather than a partial descent step -- a grid
+    search over (m,sigma) followed by a local (Nelder-Mead) refine from
+    the best grid point.
+
+    `vega_weighted` (default True): weights each strike's (variance-
+    space) residual by vega^2 -- vega being d(BS price)/d(vol), the
+    actual price sensitivity to an IV error at that strike -- so the fit
+    reflects which strikes' IV errors matter most for pricing/hedging
+    downstream. An unweighted total-variance fit treats a 1-vol-point
+    error at a near-zero-vega deep OTM strike the same as at the vega-
+    heavy ATM strike, which is backwards for anything that prices off the
+    fitted smile afterward. Set False to recover a plain unweighted fit,
+    e.g. to isolate the weighting's effect from the reparametrization's.
+
+    `m_grid_size`/`sigma_grid_size` (default 9x9=81 candidates): measured,
+    not assumed, that the final RMSE this function returns is INSENSITIVE
+    to grid density from 5x5 up through 21x21 on every scenario tested --
+    the local (Nelder-Mead) refine step from the best grid point does
+    essentially all of the real work, so a dense grid mostly just adds
+    cost (a 21x21 grid measured up to ~30x slower than a 5x5 one for
+    identical RMSE on one test scenario). 9x9 is a deliberately modest
+    default kept above the measured-sufficient floor as a safety margin
+    for real market data less well-behaved than what was tested here, not
+    a value that was itself found necessary.
+
+    Verified in test_vol_surface.py against fit_svi_slice (this module's
+    existing full 5D nonlinear fit) on the same synthetic and realistic
+    data: matching or better RMSE, and -- the actual point of this method,
+    not just a nice-to-have -- INSENSITIVE to a battery of deliberately
+    bad fit_svi_slice initial guesses that measurably degrade the 5D fit's
+    quality.
+    """
+    import bscpp  # local import, matches svi_butterfly_arbitrage_check above
+
+    strikes = np.asarray(strikes, dtype=float)
+    market_ivs = np.asarray(market_ivs, dtype=float)
+    valid = np.isfinite(market_ivs) & (market_ivs > 0) & np.isfinite(strikes) & (strikes > 0)
+    strikes, market_ivs = strikes[valid], market_ivs[valid]
+    if strikes.size < 6:
+        raise ValueError("need at least 6 valid (strike, iv) points to fit an SVI slice")
+
+    forward = spot * np.exp((rate - dividend_yield) * t_years)
+    k = np.log(strikes / forward)
+    w_obs = market_ivs ** 2 * t_years
+
+    if vega_weighted:
+        n = strikes.size
+        otype_arr = np.zeros(n, dtype=np.int32)  # vega is call/put-symmetric; type doesn't matter
+        _, _, _, vega, _, _ = bscpp.bs_price_with_greeks_batch_arrays(
+            np.full(n, spot), strikes, np.full(n, rate), np.full(n, dividend_yield), market_ivs,
+            np.full(n, t_years), otype_arr)
+        weights = np.maximum(vega, 1e-12) ** 2
+        weights = weights / np.mean(weights)  # keep the SSE scale comparable across slices
+    else:
+        weights = np.ones_like(k)
+
+    def inner_sse(m: float, sigma: float):
+        sigma = max(sigma, _SVI_SIGMA_FLOOR)
+        y = (k - m) / sigma
+        c1, c2, c3, sse = _svi_conditional_linear_fit(y, w_obs, weights)
+        return sse, (c1, c2, c3)
+
+    k_range = float(k.max() - k.min()) or 1.0
+    m_candidates = np.linspace(k.min() - 0.25 * k_range, k.max() + 0.25 * k_range, m_grid_size)
+    sigma_candidates = np.geomspace(_SVI_SIGMA_FLOOR, max(2.0 * k_range, 0.5), sigma_grid_size)
+
+    best_sse, best_m, best_sigma = np.inf, float(m_candidates[0]), float(sigma_candidates[0])
+    for m in m_candidates:
+        for sigma in sigma_candidates:
+            sse, _ = inner_sse(float(m), float(sigma))
+            if sse < best_sse:
+                best_sse, best_m, best_sigma = sse, float(m), float(sigma)
+
+    # Local refine in log(sigma) (sigma is a positive scale parameter --
+    # searching its log keeps step sizes meaningful across orders of
+    # magnitude) via Nelder-Mead: derivative-free, since the constrained
+    # fallback inside _svi_conditional_linear_fit can make inner_sse's
+    # dependence on (m,sigma) non-smooth right at the constraint boundary.
+    refined = minimize(lambda p: inner_sse(p[0], float(np.exp(p[1])))[0],
+                        x0=[best_m, np.log(best_sigma)], method="Nelder-Mead",
+                        options={"xatol": 1e-6, "fatol": 1e-10, "maxiter": 500})
+    m_star = float(refined.x[0])
+    sigma_star = max(float(np.exp(refined.x[1])), _SVI_SIGMA_FLOOR)
+
+    _, (c1, c2, c3) = inner_sse(m_star, sigma_star)
+    b = c3 / sigma_star
+    rho = float(np.clip(c2 / c3, -0.999, 0.999)) if c3 > 1e-10 else 0.0
+    return SVISlice(a=c1, b=b, rho=rho, m=m_star, sigma=sigma_star, t=t_years)

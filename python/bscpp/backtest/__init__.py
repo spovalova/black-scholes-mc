@@ -22,6 +22,7 @@ from bscpp.backtest.policies import (
 from bscpp.backtest.vol_surface import (
     SVISlice,
     fit_svi_slice,
+    fit_svi_slice_quasi_explicit,
     svi_butterfly_arbitrage_check,
     svi_fit_rmse,
     svi_g_function,
@@ -45,6 +46,7 @@ __all__ = [
     "HedgeState",
     "SVISlice",
     "fit_svi_slice",
+    "fit_svi_slice_quasi_explicit",
     "svi_fit_rmse",
     "svi_min_total_variance",
     "svi_butterfly_arbitrage_check",
