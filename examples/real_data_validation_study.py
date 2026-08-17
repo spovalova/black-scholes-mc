@@ -22,11 +22,10 @@ import datetime as dt
 
 import numpy as np
 import pandas as pd
-from dotenv import load_dotenv
-
 from bscpp.backtest import HedgingBacktester, PolygonProvider
 from bscpp.clock import Clock
 from bscpp.stats import dependent_correlation_ci, effective_sample_size
+from dotenv import load_dotenv
 
 TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "SPY"]
 LOOKBACK_DAYS = 420  # calendar days of history to pull per ticker
@@ -66,13 +65,13 @@ def run_ticker(provider: PolygonProvider, ticker: str, rate: float) -> list[dict
             continue
 
         spot0 = float(window.iloc[0])
-        strike = round(spot0 / 5) * 5
+        strike = spot0  # true ATM -- a synthetic option, no listed-strike grid to respect
         expiration = window.index[-1].date()
 
         try:
             result = backtester.run(window, strike=strike, expiration=expiration,
                                      hedge_vol=hedge_vol, option_type="call")
-        except Exception:
+        except ValueError:
             start_idx += STRIDE_DAYS
             continue
 

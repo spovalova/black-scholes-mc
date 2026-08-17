@@ -36,6 +36,7 @@ Requires POLYGON_API_KEY (base equities tier only).
 """
 
 import datetime as dt
+import os
 import time
 from pathlib import Path
 
@@ -72,6 +73,12 @@ MULTIPLIERS = [0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 11.0, 16.0]
 RISK_AVERSIONS = [0.03, 0.3, 3.0]
 TRANSACTION_COST_BPS = 5.0
 RATE = 0.05
+# Calibrated to THIS project's own Polygon key/tier -- a different key's
+# rate limit could be tighter or looser, so this is overridable via env
+# var rather than only a hardcoded constant a different user would have
+# to find and edit in the source to avoid 429s (or to speed up a fetch on
+# a more generous tier).
+FETCH_SLEEP_SECONDS = float(os.environ.get("POLYGON_FETCH_SLEEP_SECONDS", "13"))
 
 
 # Same calendar clock (ACT/365) as real_data_validation_study.py,
@@ -122,7 +129,9 @@ def main():
             # retry/backoff budget (3 retries, capped at 8s) once several
             # tickers have been fetched in quick succession -- pace
             # requests up front rather than only reacting after a 429.
-            time.sleep(13)
+            # Override via POLYGON_FETCH_SLEEP_SECONDS if your key's tier
+            # has a different rate limit.
+            time.sleep(FETCH_SLEEP_SECONDS)
         w = collect_windows(provider, ticker)
         print(f"{ticker}: {len(w)} windows")
         windows_by_ticker[ticker] = w
