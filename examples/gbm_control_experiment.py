@@ -91,22 +91,38 @@ _CLOCK = Clock()
 _annualized_realized_vol = _CLOCK.annualized_realized_vol
 
 
-def simulate_gbm_windows(vol_levels, paths_per_vol, seed) -> list[dict]:
+def simulate_gbm_windows(vol_levels, paths_per_vol, seed, dt_mode: str = "calendar") -> list[dict]:
     """For each (vol level, path index), simulates a TRAILING_WINDOW_DAYS
     calibration segment immediately followed by the WINDOW_DAYS hedging
     window, both under the same true vol and the same continuous business-
     day path (so the trailing estimate is a genuine out-of-sample estimate
     of what the hedging window will realize, exactly mirroring how the
     real study estimates hedge_vol on data preceding, not overlapping,
-    the hedged window). Step sizes use each date's real calendar-day gap
-    (1 midweek, 3 over a weekend) -- the same clock HedgingBacktester.run
-    uses for real price data.
+    the hedged window).
+
+    dt_mode="calendar" (default): step sizes use each date's real
+    calendar-day gap (1 midweek, 3 over a weekend) -- the same clock
+    HedgingBacktester.run uses for real price data, so the PRICE PATH's
+    own variance is diffused over 3 calendar days across a weekend even
+    though real markets realize roughly ONE trading day's worth of
+    variance there, not three. dt_mode="trading": every step instead uses
+    a UNIFORM dt=1/252 regardless of the real calendar gap -- isolating
+    whether that calendar-clock artifact in the SIMULATED PRICE PATH
+    itself (not the backtester's own ACT/365 financing/theta accounting,
+    which is unchanged in both modes -- only the diffusion's own step
+    size varies here) is doing any of the work in "gbm_true_vol
+    reproduces the real-data optimum almost exactly". Real calendar
+    dates are used for indexing either way (needed for the backtester's
+    own clock and for score_frontier's window_start clustering); only the
+    variance-per-step assigned to each diffusion step differs.
 
     Returns two window lists (true_vol, estimated_vol) over the IDENTICAL
     simulated paths -- same random draws -- so any difference between the
     two arms' results is attributable only to hedge_vol being true vs.
     estimated, not to sampling noise from different paths.
     """
+    if dt_mode not in ("calendar", "trading"):
+        raise ValueError(f"dt_mode must be 'calendar' or 'trading', got {dt_mode!r}")
     rng = np.random.default_rng(seed)
     anchor = pd.Timestamp("2024-01-01")
     true_vol_windows, estimated_vol_windows = [], []
@@ -133,8 +149,11 @@ def simulate_gbm_windows(vol_levels, paths_per_vol, seed) -> list[dict]:
             vol_offset_days = vol_idx * (paths_per_vol * 3 + total_days)
             dates = pd.bdate_range(anchor + pd.Timedelta(days=vol_offset_days + path_idx * 3),
                                     periods=total_days)
-            day_gaps = np.diff(dates.values).astype("timedelta64[D]").astype(float)
-            dt_years = day_gaps / 365.0
+            if dt_mode == "calendar":
+                day_gaps = np.diff(dates.values).astype("timedelta64[D]").astype(float)
+                dt_years = day_gaps / 365.0
+            else:
+                dt_years = np.full(total_days - 1, 1.0 / 252.0)
 
             z = rng.normal(size=len(dt_years))
             log_ret = (RATE - 0.5 * vol**2) * dt_years + vol * np.sqrt(dt_years) * z
@@ -220,6 +239,45 @@ def main():
         "vol-estimation error (not markets failing to be GBM) explains most of the gap; if "
         "both GBM arms undershoot the real-data result by similar amounts, real-market "
         "structure (fat tails, vol clustering) is still implicated for the remainder."
+    )
+
+    # Robustness check: gbm_true_vol above diffuses its simulated price
+    # path over each date's REAL calendar-day gap (3 calendar days across
+    # a weekend, same as HedgingBacktester's own ACT/365 clock) -- but
+    # real markets realize roughly ONE trading day's worth of variance
+    # over a weekend, not three. Given how central "gbm_true_vol
+    # reproduces the real-data optimum almost exactly" is to the
+    # discretization-not-vol-estimation-error conclusion above, this
+    # tests whether that calendar-clock artifact in the PRICE DIFFUSION
+    # itself (not the backtester's own financing/theta accounting, which
+    # is unchanged here -- only the diffusion's per-step variance
+    # differs) is doing any of the work: a trading-clock variant uses a
+    # UNIFORM dt=1/252 per business-day step regardless of the real
+    # calendar gap, removing the weekend-variance artifact entirely.
+    print("\n=== Robustness: does the calendar-clock's weekend variance "
+          "(3 days diffused over a weekend, vs. real markets' ~1 trading day) drive the "
+          "gbm_true_vol match to real data? ===")
+    trading_clock_windows, _ = simulate_gbm_windows(VOL_LEVELS, PATHS_PER_VOL, SEED, dt_mode="trading")
+    trading_clock_findings = run_arm(
+        trading_clock_windows, "gbm_true_vol_trading_clock (uniform dt=1/252, no weekend-variance artifact)",
+        "gbm_true_vol_trading_clock_grid.csv")
+
+    print("Comparison (theory predicts c*=1 in both):")
+    for tv, tc in zip(true_vol_findings, trading_clock_findings):
+        assert tv.lam0 == tc.lam0
+        if tv.at_boundary or tc.at_boundary:
+            print(f"  risk_aversion={tv.lam0}: INCONCLUSIVE (grid-boundary in at least one arm)")
+            continue
+        moved = "" if tv.c_star == tc.c_star else f"  <-- MOVED (calendar clock: {tv.c_star}x)"
+        print(f"  risk_aversion={tv.lam0}: calendar-clock c*={tv.c_star}x, "
+              f"trading-clock c*={tc.c_star}x{moved}")
+    print(
+        "If trading-clock c* matches calendar-clock c* (or is very close), the weekend-variance "
+        "artifact is NOT what's driving the match to real data -- discretization alone, "
+        "independent of how weekend time is treated, is doing the work. If trading-clock c* "
+        "moves meaningfully AWAY from real data's c*, the calendar-clock's weekend variance was "
+        "itself contributing to the match, and the 'discretization is sufficient on its own' "
+        "conclusion above needs qualifying."
     )
 
 

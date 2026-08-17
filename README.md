@@ -93,6 +93,24 @@ leaving a small (~1 grid step), not confidently distinguishable-from-noise
 residual at high risk-aversion that real-market structure (fat tails,
 volatility clustering, autocorrelation) could still be contributing.
 
+**A confound worth ruling out explicitly**: `gbm_true_vol`'s simulated
+price path diffuses variance over each date's REAL calendar-day gap (3
+calendar days across a weekend, matching `HedgingBacktester`'s own
+ACT/365 clock) -- but real markets realize roughly one trading day's
+worth of variance over a weekend, not three, so the control arm wasn't
+quite "GBM under the real study's exact conditions," it was "GBM plus a
+weekend-variance artifact real data doesn't have." Given how much weight
+"gbm_true_vol reproduces the real-data optimum almost exactly" carries in
+the conclusion above, this was checked directly rather than left as a
+caveat: a third arm (`gbm_true_vol_trading_clock`) uses a uniform
+`dt=1/252` per business-day step regardless of the real calendar gap --
+removing the weekend-variance artifact entirely while leaving everything
+else (including the backtester's own ACT/365 financing/theta accounting)
+unchanged. Result: **`c*` is identical to the calendar-clock arm at both
+well-posed regimes (`6x` and `3x`, unchanged)** -- the weekend-variance
+artifact is not contributing to the match; discretization alone,
+independent of how weekend time is treated, accounts for it.
+
 Run it yourself: `python examples/gbm_control_experiment.py` (no API key
 needed) followed by `python examples/plot_hedging_frontier.py` to
 regenerate the figure above.

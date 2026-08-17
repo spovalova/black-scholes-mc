@@ -182,6 +182,21 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
     verified to preserve the exact geometric block-length distribution
     the original per-element version had (`test_frontier.py`), not just
     assumed equivalent from the derivation.
+- **Ruled out a remaining confound in the GBM control arms, rather than
+  leaving it as a disclosed caveat**: `gbm_true_vol` diffuses its
+  simulated price path's variance over each date's real calendar-day gap
+  (3 calendar days across a weekend, matching `HedgingBacktester`'s own
+  ACT/365 clock) -- but real markets realize roughly one trading day of
+  variance over a weekend, not three, so the arm wasn't quite "GBM under
+  the real study's exact conditions." Added a third arm
+  (`gbm_true_vol_trading_clock`, `examples/gbm_control_experiment.py`)
+  using a uniform `dt=1/252` per business-day step regardless of the real
+  calendar gap -- removing the artifact from the price diffusion while
+  leaving the backtester's own financing/theta accounting unchanged (so
+  the test isolates the diffusion-only effect, not a second, different
+  question). Result: `c*` is IDENTICAL to the calendar-clock arm at both
+  well-posed regimes (`6x` and `3x`) -- the weekend-variance artifact
+  is not contributing to `gbm_true_vol`'s close match to real data.
 
 ### Added
 
