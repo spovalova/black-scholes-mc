@@ -107,7 +107,7 @@ PYBIND11_MODULE(_core, m) {
           [](py::array_t<double> spot, py::array_t<double> strike, py::array_t<double> rate,
              py::array_t<double> dividend_yield, py::array_t<double> vol,
              py::array_t<double> maturity, py::array_t<int> type) {
-              const ssize_t n = spot.size();
+              const py::ssize_t n = spot.size();
               if (strike.size() != n || rate.size() != n || dividend_yield.size() != n ||
                   vol.size() != n || maturity.size() != n || type.size() != n) {
                   throw std::invalid_argument("all input arrays must be the same length");
@@ -130,7 +130,7 @@ PYBIND11_MODULE(_core, m) {
 
               {
                   py::gil_scoped_release release;
-                  for (ssize_t i = 0; i < n; ++i) {
+                  for (py::ssize_t i = 0; i < n; ++i) {
                       MarketInputs in{s(i), k(i),
                                        r(i), q(i),
                                        v(i), t(i),
@@ -158,7 +158,7 @@ PYBIND11_MODULE(_core, m) {
              py::array_t<double> dividend_yield, py::array_t<double> vol,
              py::array_t<double> maturity, py::array_t<int> type,
              py::array_t<double> market_price, double initial_guess, int max_iter, double tol) {
-              const ssize_t n = spot.size();
+              const py::ssize_t n = spot.size();
               if (strike.size() != n || rate.size() != n || dividend_yield.size() != n ||
                   vol.size() != n || maturity.size() != n || type.size() != n ||
                   market_price.size() != n) {
@@ -178,7 +178,7 @@ PYBIND11_MODULE(_core, m) {
 
               {
                   py::gil_scoped_release release;
-                  for (ssize_t i = 0; i < n; ++i) {
+                  for (py::ssize_t i = 0; i < n; ++i) {
                       MarketInputs in{s(i), k(i),
                                        r(i), q(i),
                                        v(i), t(i),
