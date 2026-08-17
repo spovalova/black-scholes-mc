@@ -1,6 +1,6 @@
 # bscpp
 
-[![CI](https://github.com/spovalova/black-scholes-mc/actions/workflows/ci.yml/badge.svg)](https://github.com/spovalova/black-scholes-mc/actions/workflows/ci.yml)
+[![CI](https://github.com/spovalova/bscpp/actions/workflows/ci.yml/badge.svg)](https://github.com/spovalova/bscpp/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](pyproject.toml)
 
@@ -652,7 +652,8 @@ build and every pricer are correct either way, just single-threaded
 without it).
 
 ```bash
-cd black-scholes-mc
+git clone https://github.com/spovalova/bscpp.git
+cd bscpp
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
