@@ -176,6 +176,23 @@ def simulate_gbm_windows(vol_levels, paths_per_vol, seed, dt_mode: str = "calend
     return true_vol_windows, estimated_vol_windows
 
 
+def subsample_window(window: pd.Series, every_n_days: int) -> pd.Series:
+    """Keep every `every_n_days`-th observation (always including the
+    first and last), simulating a hedger who can only ACT on a coarser
+    grid while the underlying still moves daily in between -- the direct
+    test of the discretization hypothesis: if WW's continuous-monitoring
+    assumption being violated (see the module docstring's arm (a)) is
+    really what widens the empirically-optimal band, checking the band
+    LESS often than daily should widen it further still, not leave it
+    unchanged. Strike/expiration (window.iloc[0]/window.index[-1]) are
+    unaffected since both endpoints are always kept.
+    """
+    idx = list(range(0, len(window), every_n_days))
+    if idx[-1] != len(window) - 1:
+        idx.append(len(window) - 1)
+    return window.iloc[idx]
+
+
 def run_arm(windows, label, save_name):
     t0 = time.perf_counter()
     grid = run_policy_grid(windows, MULTIPLIERS, RISK_AVERSIONS, RATE, TRANSACTION_COST_BPS)
@@ -279,6 +296,40 @@ def main():
         "itself contributing to the match, and the 'discretization is sufficient on its own' "
         "conclusion above needs qualifying."
     )
+
+    # Direct test of the discretization hypothesis, not just inference by
+    # elimination: gbm_true_vol above ISOLATES discretization by construction
+    # (hedge_vol = true vol, no estimation noise), but only ever rebalances
+    # daily -- it never actually shows widening the monitoring gap moves c*.
+    # Here the SAME true-vol paths are rehedged on coarser grids (every 2,
+    # 3, 5, 10 business days instead of every 1) with nothing else changed
+    # (same strike, same expiration, same premium -- only the monitoring
+    # cadence). If discretization really drives the real-data gap, c* should
+    # move FURTHER from theory (1x) as monitoring gets coarser, since the
+    # gamma-driven tracking error a fixed-width band can't avoid at a
+    # coarser check-in cadence grows, while daily-rebalancing's own
+    # discretization floor already explains most of the real-data gap (see
+    # above) -- this traces out the mechanism instead of asserting it.
+    print("\n=== Direct test: does widening the rebalancing gap (not just adding real-market "
+          "structure) widen c* further, as the discretization hypothesis predicts? ===")
+    frequency_findings = {1: true_vol_findings}
+    for every_n_days in (2, 3, 5, 10):
+        coarser_windows = [{**w, "window": subsample_window(w["window"], every_n_days)}
+                            for w in true_vol_windows]
+        frequency_findings[every_n_days] = run_arm(
+            coarser_windows, f"gbm_true_vol_rebalance_every_{every_n_days}d",
+            f"gbm_true_vol_rebalance_every_{every_n_days}d_grid.csv")
+
+    print("Rebalancing frequency vs. empirically-optimal band (theory predicts c*=1 regardless "
+          "of frequency -- it's a continuous-monitoring result, so if it held exactly the row "
+          "below would be flat):")
+    for lam0 in RISK_AVERSIONS:
+        row = []
+        for every_n_days in (1, 2, 3, 5, 10):
+            f = next(f for f in frequency_findings[every_n_days] if f.lam0 == lam0)
+            row.append("boundary" if f.at_boundary else f"{f.c_star}x")
+        print(f"  risk_aversion={lam0}: every-1d={row[0]}, every-2d={row[1]}, every-3d={row[2]}, "
+              f"every-5d={row[3]}, every-10d={row[4]}")
 
 
 if __name__ == "__main__":

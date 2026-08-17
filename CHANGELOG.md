@@ -197,6 +197,32 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
   question). Result: `c*` is IDENTICAL to the calendar-clock arm at both
   well-posed regimes (`6x` and `3x`) -- the weekend-variance artifact
   is not contributing to `gbm_true_vol`'s close match to real data.
+- **Tested the discretization confound directly instead of only by
+  elimination**: added a rebalance-frequency sweep to
+  `gbm_control_experiment.py` (`subsample_window`, new) -- the same
+  `gbm_true_vol` paths rehedged on 2/3/5/10-business-day monitoring grids
+  instead of daily, strike/expiration/premium unchanged, only the check-in
+  cadence. Predicted direction was "coarser monitoring widens `c*`
+  further" (a sparser check should tolerate more slippage); the actual
+  result is the opposite and cleanly monotonic in both well-posed regimes
+  -- `c*` shrinks toward and past theory's `1x` as monitoring gets coarser
+  (moderate regime: `6x` at daily -> `4x`/`3x`/`1.5x`/`0.5x` at
+  2d/3d/5d/10d; high regime: `3x` -> `2x`/`1.5x`/`0.5x`/boundary). Kept the
+  wrong prediction in the write-up alongside the corrected explanation
+  (band width and monitoring frequency are substitute levers on trade
+  frequency, so once monitoring itself caps trading, a wide band stops
+  buying extra protection) -- see `docs/decisions.md` (new: a running
+  design-decisions log, added this entry alongside the earlier
+  post-selection-inference/cluster-bootstrap/batch-pricing decisions from
+  this same fix arc, going forward as design calls are actually made
+  rather than written up after the fact).
+- **Made the synthetic-option nature of the hedging study explicit in the
+  README's Research finding section itself**, not just in code comments:
+  the underlying price data is real (Polygon daily closes); the option
+  being hedged is a synthetic, self-priced-via-Black-Scholes instrument
+  with no independent market quote, since testing hedge mechanics against
+  a real unpredictable path doesn't require a paid options data tier. A
+  reader shouldn't have to find this by reading `frontier.py`'s comments.
 - **`run_policy_grid` repriced every window from scratch once per policy
   cell**, even though pricing (the C++ crossing) never depends on the
   policy being tested -- only the (risk_aversion, band_multiplier) sweep

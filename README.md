@@ -25,6 +25,16 @@ knowing the true volatility, or real markets not being GBM?**
 
 ![Cost-risk objective vs. Whalley-Wilmott band multiplier, three arms, 95% bootstrap CI bands](assets/frontier.png)
 
+**The underlying is real; the option is not.** The data is real daily
+closes (Polygon, base equities tier -- no options entitlement) for 20
+liquid tickers; the option being hedged is *synthetic*: struck exactly ATM
+at each window's start and priced/marked purely off `bscpp`'s own
+Black-Scholes at a trailing-realized-vol estimate, with no independent
+market quote to compare against. There is no real options chain in this
+study anywhere -- that's a deliberate, cheap way to test the hedge
+*mechanics* against a real, unpredictable underlying path without needing
+a paid options data tier, not an oversight to catch.
+
 `examples/hedging_policy_frontier_study.py` sweeps the WW band width (via
 the exact identity `band(risk_aversion = lam0/c^3) = c * band(lam0)`,
 regression-tested in `test_policies.py`) across real daily closes for 20
@@ -110,6 +120,33 @@ unchanged. Result: **`c*` is identical to the calendar-clock arm at both
 well-posed regimes (`6x` and `3x`, unchanged)** -- the weekend-variance
 artifact is not contributing to the match; discretization alone,
 independent of how weekend time is treated, accounts for it.
+
+**Discretization directly demonstrated, not just inferred by elimination**:
+everything above argues discretization is the driver by isolating it and
+matching real data, but never actually shows moving the discretization
+knob moves `c*`. It does: the same `gbm_true_vol` paths were rehedged on
+coarser monitoring grids (every 2/3/5/10 business days instead of every 1,
+same strike/expiration/premium -- only the check-in cadence changes). The
+expected direction was "coarser monitoring should widen `c*` further" (a
+sparser band-check should tolerate more slippage). The actual result is
+the opposite, and cleanly monotonic in both well-posed regimes:
+
+| Rebalance every | 1d (baseline) | 2d | 3d | 5d | 10d |
+|---|---:|---:|---:|---:|---:|
+| Moderate regime `c*` (gap) | 6x (+30.0%) | 4x (+14.5%) | 3x (+7.6%) | 1.5x (+1.4%) | 0.5x (+0.6%) |
+| High regime `c*` (gap) | 3x (+17.7%) | 2x (+4.4%) | 1.5x (+0.9%) | 0.5x (+1.6%) | boundary (inconclusive) |
+
+`c*` shrinks *toward and past* theory's `1x` as monitoring gets coarser,
+not away from it. On reflection this is the right sign, not a
+contradiction: band width and monitoring frequency are substitute levers
+on the same thing (how often the hedge actually trades) -- once the
+monitoring grid itself caps trading frequency, a wide band stops buying
+much extra cost protection, so the optimum band narrows back down. The
+takeaway is sharper than "discretization matters somewhat": **`c*~6x` is
+specifically calibrated to daily monitoring**, the cadence real desks
+actually use and the one this whole study tests, not a generic "any
+discreteness produces a wide band" artifact -- consistent with, and a
+more direct test of, the daily-vs-continuous mechanism identified above.
 
 Run it yourself: `python examples/gbm_control_experiment.py` (no API key
 needed) followed by `python examples/plot_hedging_frontier.py` to
@@ -915,6 +952,13 @@ hedger = HedgingBacktester(rate=0.05, transaction_cost_bps=5.0)
 result = hedger.run(price_history, strike=450, expiration=expiration, hedge_vol=0.18)
 attributed = hedger.attribute_pnl(result)  # financing / gamma / theta / transaction cost breakdown
 ```
+
+## Design decisions
+
+[docs/decisions.md](docs/decisions.md) -- why, not what: non-obvious calls
+made in this project, including the ones that were tried, checked, and
+found wrong before being fixed. Kept in as they happen, not written
+retroactively to look clean.
 
 ## Contributing
 
