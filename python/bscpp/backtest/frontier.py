@@ -62,7 +62,14 @@ def run_policy_grid(windows: list[dict], multipliers: list[float], risk_aversion
     """
     rows = []
     dropped_by_reason: dict[str, int] = {}
-    expected_cells = len(windows) * len(risk_aversions) * len(multipliers)
+    cells_per_window = len(risk_aversions) * len(multipliers)
+    expected_cells = len(windows) * cells_per_window
+    # Pricing (the C++ crossing) never depends on (lam0, c) -- only the
+    # POLICY does. The old version called backtester.run() once per cell,
+    # repricing the identical window from scratch `cells_per_window` times;
+    # price_path() is computed ONCE per window here and every policy cell
+    # reuses it via _run_from_pricing(), which does no pricer calls at all.
+    backtester = HedgingBacktester(rate=rate, transaction_cost_bps=transaction_cost_bps)
     for w in windows:
         window, hedge_vol = w["window"], w["hedge_vol"]
         # True ATM, not rounded to a $5 strike grid: these are SYNTHETIC
@@ -73,18 +80,19 @@ def run_policy_grid(windows: list[dict], multipliers: list[float], risk_aversion
         strike = w["strike"] if "strike" in w else float(window.iloc[0])
         expiration = w["expiration"] if "expiration" in w else window.index[-1].date()
 
+        try:
+            pricing = backtester.price_path(window, strike=strike, expiration=expiration,
+                                             hedge_vol=hedge_vol, option_type=option_type)
+        except ValueError as exc:
+            dropped_by_reason[f"backtester_error: {exc}"] = (
+                dropped_by_reason.get(f"backtester_error: {exc}", 0) + cells_per_window)
+            continue
+
+        dates = list(window.index)
         for lam0 in risk_aversions:
             for c in multipliers:
-                backtester = HedgingBacktester(rate=rate, transaction_cost_bps=transaction_cost_bps)
                 policy = WhalleyWilmottPolicy(risk_aversion=lam0 / c ** 3)
-                try:
-                    result = backtester.run(window, strike=strike, expiration=expiration,
-                                             hedge_vol=hedge_vol, option_type=option_type,
-                                             policy=policy)
-                except ValueError as exc:
-                    dropped_by_reason[f"backtester_error: {exc}"] = (
-                        dropped_by_reason.get(f"backtester_error: {exc}", 0) + 1)
-                    continue
+                result = backtester._run_from_pricing(dates, pricing, policy)
                 premium0 = float(result["option_value"].iloc[0])
                 if premium0 < _PREMIUM_FLOOR:
                     dropped_by_reason["premium_below_floor"] = (

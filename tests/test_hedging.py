@@ -1,10 +1,11 @@
 import datetime as dt
 import math
 
+import bscpp
 import numpy as np
 import pandas as pd
-
 from bscpp.backtest.hedging import HedgingBacktester, realized_vs_implied_experiment
+from bscpp.curve import resolve_rate
 
 
 def test_hedging_pnl_zero_at_inception():
@@ -235,3 +236,101 @@ def test_hedge_vol_series_must_cover_all_dates():
         assert False, "expected ValueError for partial hedge_vol coverage"
     except ValueError:
         pass
+
+
+def _manual_per_day_pricing(backtester, price_path, expiration, strike, hedge_vol, option_type):
+    """Independently re-implements run()'s ORIGINAL per-day pricing loop
+    (one individual bscpp.bs_price_with_greeks call per day), used as
+    ground truth to check price_path()'s batched implementation against
+    -- not the batched path checked against itself."""
+    dates = list(price_path.index)
+    if isinstance(hedge_vol, pd.Series):
+        vols = hedge_vol.reindex(price_path.index).astype(float)
+    else:
+        vols = pd.Series(float(hedge_vol), index=price_path.index)
+
+    spot0 = float(price_path.iloc[0])
+    vol0 = float(vols.iloc[0])
+    t0 = backtester.clock.time_to_expiry(dates[0].date(), expiration, floor_at_one_day=True)
+    rate0 = resolve_rate(backtester.rate, t0)
+    inputs0 = bscpp.make_inputs(spot0, strike, rate0, vol0, t0, option_type, backtester.dividend_yield)
+    result0 = bscpp.bs_price_with_greeks(inputs0)
+
+    rows = [{"date": dates[0], "spot": spot0, "T": t0, "rate": rate0, "hedge_vol": vol0,
+             "price": result0.price, "delta": result0.greeks.delta, "gamma": result0.greeks.gamma,
+             "theta": result0.greeks.theta, "vega": result0.greeks.vega}]
+
+    for i in range(1, len(dates)):
+        date = dates[i]
+        spot = float(price_path.iloc[i])
+        vol = float(vols.iloc[i])
+        t = backtester.clock.time_to_expiry(date.date(), expiration)
+        rate = resolve_rate(backtester.rate, t if t > 0.0 else t0)
+
+        if t <= 0.0:
+            payoff = max(spot - strike, 0.0) if option_type == "call" else max(strike - spot, 0.0)
+            rows.append({"date": date, "spot": spot, "T": t, "rate": rate,
+                         "hedge_vol": float(vols.iloc[i - 1]), "price": payoff,
+                         "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0})
+        else:
+            inputs = bscpp.make_inputs(spot, strike, rate, vol, t, option_type, backtester.dividend_yield)
+            result = bscpp.bs_price_with_greeks(inputs)
+            rows.append({"date": date, "spot": spot, "T": t, "rate": rate, "hedge_vol": vol,
+                         "price": result.price, "delta": result.greeks.delta,
+                         "gamma": result.greeks.gamma, "theta": result.greeks.theta,
+                         "vega": result.greeks.vega})
+    return pd.DataFrame(rows)
+
+
+def test_price_path_matches_independent_per_day_pricing():
+    # price_path() batches every day's pricer call into one C++ crossing
+    # instead of one Python-to-C++ call per day (the B1/B3 speedup) --
+    # checked here against an independently re-implemented day-by-day
+    # loop across several regimes, not against itself.
+    rng = np.random.default_rng(1)
+    dates = pd.bdate_range(dt.date.today(), periods=45)
+    prices = pd.Series(100 * np.exp(np.cumsum(0.0002 + 0.012 * rng.standard_normal(45))), index=dates)
+    expiration = dates[-1].date()
+    vol_series = pd.Series(0.15 + 0.1 * np.sin(np.linspace(0, 3, 45)), index=dates)
+
+    scenarios = [
+        {"strike": 100.0, "hedge_vol": 0.2, "option_type": "call"},
+        {"strike": 100.0, "hedge_vol": 0.2, "option_type": "put"},
+        {"strike": 120.0, "hedge_vol": 0.2, "option_type": "call"},  # OTM
+        {"strike": 100.0, "hedge_vol": 0.2, "option_type": "call", "dividend_yield": 0.03},
+        {"strike": 100.0, "hedge_vol": vol_series, "option_type": "call"},  # time-varying vol
+        {"strike": 60.0, "hedge_vol": 0.2, "option_type": "call"},  # deep ITM at expiry
+        {"strike": 60.0, "hedge_vol": 0.2, "option_type": "put"},  # deep OTM at expiry
+    ]
+    for kw in scenarios:
+        dividend_yield = kw.pop("dividend_yield", 0.0)
+        backtester = HedgingBacktester(rate=0.05, dividend_yield=dividend_yield)
+        manual = _manual_per_day_pricing(backtester, prices, expiration=expiration, **kw)
+        batched = backtester.price_path(prices, expiration=expiration, **kw)
+        for col in ["spot", "T", "rate", "hedge_vol", "price", "delta", "gamma", "theta", "vega"]:
+            diff = np.abs(manual[col].to_numpy() - batched[col].to_numpy())
+            assert diff.max() < 1e-9, f"{kw}: column {col} max diff {diff.max():.3e}"
+
+
+def test_run_from_pricing_matches_run_directly():
+    # run_policy_grid (frontier.py) prices a window ONCE via price_path()
+    # and reuses the table across many WhalleyWilmottPolicy configs via
+    # _run_from_pricing, instead of reprising per policy through run() --
+    # check that shortcut reproduces run()'s own output exactly.
+    from bscpp.backtest.policies import WhalleyWilmottPolicy
+
+    rng = np.random.default_rng(3)
+    dates = pd.bdate_range(dt.date.today(), periods=45)
+    prices = pd.Series(100 * np.exp(np.cumsum(0.0002 + 0.012 * rng.standard_normal(45))), index=dates)
+    expiration = dates[-1].date()
+
+    backtester = HedgingBacktester(rate=0.05, transaction_cost_bps=5.0)
+    policy = WhalleyWilmottPolicy(risk_aversion=0.3)
+
+    direct = backtester.run(prices, strike=100.0, expiration=expiration, hedge_vol=0.2,
+                             option_type="call", policy=policy)
+    pricing = backtester.price_path(prices, strike=100.0, expiration=expiration,
+                                     hedge_vol=0.2, option_type="call")
+    via_shared = backtester._run_from_pricing(list(prices.index), pricing, policy)
+
+    pd.testing.assert_frame_equal(direct, via_shared)

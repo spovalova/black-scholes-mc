@@ -185,8 +185,8 @@ python/bscpp/                 Python package (imports the compiled extension)
     heston_calibration.py          fits Heston params to a chain's implied vols,
                                     with regularization + a stability diagnostic
 
-tests/                        pytest suite (144 tests). `pytest -m "not slow"`
-                               runs the fast subset (141 tests, ~7s); full suite includes
+tests/                        pytest suite (146 tests). `pytest -m "not slow"`
+                               runs the fast subset (143 tests, ~7s); full suite includes
                                heavy MC convergence and multi-start calibration checks
 examples/                     runnable demos -- all but run_backtest.py (non-mock),
                                real_data_hedging_demo.py, and

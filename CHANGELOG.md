@@ -197,6 +197,36 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
   question). Result: `c*` is IDENTICAL to the calendar-clock arm at both
   well-posed regimes (`6x` and `3x`) -- the weekend-variance artifact
   is not contributing to `gbm_true_vol`'s close match to real data.
+- **`run_policy_grid` repriced every window from scratch once per policy
+  cell**, even though pricing (the C++ crossing) never depends on the
+  policy being tested -- only the (risk_aversion, band_multiplier) sweep
+  does. `HedgingBacktester` gained `price_path()`, which batches an
+  entire window's price/Greeks computation into one
+  `bs_price_with_greeks_batch_arrays` call instead of one Python-to-C++
+  crossing per day, and `run()` was refactored into `price_path()` (pricing)
+  + the new `_run_from_pricing()` (the inherently sequential cash/shares/
+  transaction-cost policy simulation, which never touches the pricer).
+  `run_policy_grid` now calls `price_path()` ONCE per window and reuses
+  the table across all `len(risk_aversions) * len(multipliers)` policy
+  cells via `_run_from_pricing()`, instead of re-deriving identical
+  pricing dozens of times per window.
+  - Verified equivalent, not just assumed from the refactor's structure:
+    `price_path()`'s output matches an independently re-implemented
+    day-by-day pricing loop to 1e-9 across 7 scenarios (call/put, OTM,
+    dividend, time-varying hedge_vol, deep ITM/OTM at expiry --
+    `test_price_path_matches_independent_per_day_pricing`,
+    `tests/test_hedging.py`), and `_run_from_pricing()`'s output is
+    byte-identical to calling `run()` directly for the same inputs
+    (`test_run_from_pricing_matches_run_directly`). The full pre-existing
+    `test_hedging.py` suite (11 tests, covering P&L attribution, Carr-
+    Madan closed-form agreement, transaction costs, dividend handling)
+    passes unchanged against the refactored `run()`.
+  - Measured on a synthetic 420-window x 3-risk-aversion x 11-multiplier
+    grid (13,860 cells, matching the real study's scale): 8.03s before
+    this refactor, 4.81s after (1.67x) -- and the resulting `c*`/`gap_pct`
+    at every risk-aversion regime are identical before and after, cross-
+    checked via a direct before/after run on the same synthetic grid
+    rather than assumed from the unit tests alone.
 
 ### Added
 

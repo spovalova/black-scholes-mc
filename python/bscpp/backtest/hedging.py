@@ -73,6 +73,107 @@ class HedgingBacktester:
         self.transaction_cost_bps = transaction_cost_bps
         self.clock = clock
 
+    def price_path(
+        self,
+        price_path: pd.Series,
+        strike: float,
+        expiration: dt.date,
+        hedge_vol,
+        option_type: str = "call",
+    ) -> pd.DataFrame:
+        """Prices AND computes Greeks for every date in `price_path` in
+        ONE batched call (`bs_price_with_greeks_batch_arrays`) instead of
+        one Python->C++ crossing per day -- the option's price/Greeks at
+        each date depend only on (spot, vol, T, strike, rate), never on a
+        hedging POLICY's decisions, so this table can be computed ONCE
+        and reused across every policy simulated against the same window.
+        `run` below calls this internally (so there's a single source of
+        truth for the pricing logic); `bscpp.backtest.frontier.
+        run_policy_grid` calls it directly, ONCE per window, then runs
+        every (risk_aversion, band_multiplier) policy cell against the
+        same table instead of re-pricing per cell -- the dominant cost in
+        that study before this existed.
+
+        Returns a DataFrame indexed like `price_path`, with columns
+        [date, spot, T, rate, hedge_vol, price, delta, gamma, theta,
+        vega] -- one row per date, the exact per-day option state `run`'s
+        simulation loop consumes. Rows at or past expiry (T<=0) are
+        priced as intrinsic value with zero Greeks and the PRIOR day's
+        `hedge_vol` (no re-mark at expiry: a payoff has no vol) --
+        matching `run`'s existing expiry handling exactly, not a new
+        convention. `T`/`rate` for day 0 use `floor_at_one_day=True`
+        (never exactly the "instant" of pricing), matching `run`'s own
+        day-0 special case.
+        """
+        dates = list(price_path.index)
+        if len(dates) < 2:
+            raise ValueError("price_path needs at least 2 observations")
+        n = len(dates)
+
+        if isinstance(hedge_vol, pd.Series):
+            vols = hedge_vol.reindex(price_path.index)
+            if vols.isna().any():
+                raise ValueError("hedge_vol series does not cover every price_path date")
+            vols = vols.astype(float).to_numpy()
+        else:
+            vols = np.full(n, float(hedge_vol))
+
+        t_arr = np.empty(n)
+        t_arr[0] = self.clock.time_to_expiry(dates[0].date(), expiration, floor_at_one_day=True)
+        for i in range(1, n):
+            t_arr[i] = self.clock.time_to_expiry(dates[i].date(), expiration)
+
+        rate_arr = np.empty(n)
+        rate_arr[0] = resolve_rate(self.rate, t_arr[0])
+        for i in range(1, n):
+            # Same fallback as run(): the option's remaining maturity as
+            # of the END of this step, falling back to day 0's maturity
+            # at/past expiry (T<=0), not the previous step's T.
+            rate_arr[i] = resolve_rate(self.rate, t_arr[i] if t_arr[i] > 0.0 else t_arr[0])
+
+        spot_arr = price_path.to_numpy(dtype=float)
+        is_expiry = t_arr <= 0.0
+
+        price_arr = np.empty(n)
+        delta_arr = np.zeros(n)
+        gamma_arr = np.zeros(n)
+        theta_arr = np.zeros(n)
+        vega_arr = np.zeros(n)
+
+        live = ~is_expiry
+        if live.any():
+            otype_val = 0 if option_type == "call" else 1
+            otype_arr = np.full(int(live.sum()), otype_val, dtype=np.int32)
+            # bs_price_with_greeks_batch_arrays returns (price, delta,
+            # gamma, VEGA, THETA, rho) -- vega before theta, matching the
+            # C++ binding's own tuple order (cpp/src/bindings.cpp).
+            p, d, g, v, th, _rho = bscpp.bs_price_with_greeks_batch_arrays(
+                spot_arr[live], np.full(int(live.sum()), strike), rate_arr[live],
+                np.full(int(live.sum()), self.dividend_yield), vols[live], t_arr[live], otype_arr)
+            price_arr[live] = p
+            delta_arr[live] = d
+            gamma_arr[live] = g
+            theta_arr[live] = th
+            vega_arr[live] = v
+
+        if is_expiry.any():
+            if option_type == "call":
+                price_arr[is_expiry] = np.maximum(spot_arr[is_expiry] - strike, 0.0)
+            else:
+                price_arr[is_expiry] = np.maximum(strike - spot_arr[is_expiry], 0.0)
+            # delta/gamma/theta/vega already 0 for these rows.
+
+        reported_vol = vols.copy()
+        for i in range(1, n):
+            if is_expiry[i]:
+                reported_vol[i] = vols[i - 1]  # no re-mark at expiry: payoff has no vol
+
+        return pd.DataFrame({
+            "date": dates, "spot": spot_arr, "T": t_arr, "rate": rate_arr,
+            "hedge_vol": reported_vol, "price": price_arr,
+            "delta": delta_arr, "gamma": gamma_arr, "theta": theta_arr, "vega": vega_arr,
+        })
+
     def run(
         self,
         price_path: pd.Series,
@@ -112,52 +213,60 @@ class HedgingBacktester:
             raise ValueError("price_path needs at least 2 observations")
 
         policy = policy or DeltaPolicy()
+        pricing = self.price_path(price_path, strike, expiration, hedge_vol, option_type)
+        return self._run_from_pricing(dates, pricing, policy)
+
+    def _run_from_pricing(self, dates: list, pricing: pd.DataFrame, policy) -> pd.DataFrame:
+        """Policy-simulation half of `run()`: consumes an already-priced
+        table (from `price_path()`) and drives the cash/shares/
+        transaction-cost recursion. Factored out so a caller that needs
+        the SAME price path under many different policies -- e.g.
+        frontier.run_policy_grid, which reruns dozens of (risk_aversion,
+        band_multiplier) policies per window -- can price the window ONCE
+        and reuse the table, instead of repricing (a C++ crossing per day)
+        once per policy for pricing that never depended on the policy in
+        the first place.
+        """
         cost_frac = self.transaction_cost_bps / 10_000.0
+        spot_arr = pricing["spot"].to_numpy()
+        t_arr = pricing["T"].to_numpy()
+        rate_arr = pricing["rate"].to_numpy()
+        vol_arr = pricing["hedge_vol"].to_numpy()
+        price_arr = pricing["price"].to_numpy()
+        delta_arr = pricing["delta"].to_numpy()
+        gamma_arr = pricing["gamma"].to_numpy()
+        theta_arr = pricing["theta"].to_numpy()
+        vega_arr = pricing["vega"].to_numpy()
 
-        if isinstance(hedge_vol, pd.Series):
-            vols = hedge_vol.reindex(price_path.index)
-            if vols.isna().any():
-                raise ValueError("hedge_vol series does not cover every price_path date")
-            vols = vols.astype(float)
-        else:
-            vols = pd.Series(float(hedge_vol), index=price_path.index)
-
-        spot0 = float(price_path.iloc[0])
-        vol0 = float(vols.iloc[0])
-        t0 = self.clock.time_to_expiry(dates[0].date(), expiration, floor_at_one_day=True)
-        rate0 = resolve_rate(self.rate, t0)
-        inputs0 = bscpp.make_inputs(spot0, strike, rate0, vol0, t0, option_type,
-                                     self.dividend_yield)
-        result0 = bscpp.bs_price_with_greeks(inputs0)
-
-        state0 = HedgeState(t=t0, spot=spot0, delta=result0.greeks.delta,
-                            gamma=result0.greeks.gamma, vega=result0.greeks.vega,
-                            rate=rate0, cost_frac=cost_frac)
+        spot0 = float(spot_arr[0])
+        state0 = HedgeState(t=float(t_arr[0]), spot=spot0, delta=float(delta_arr[0]),
+                            gamma=float(gamma_arr[0]), vega=float(vega_arr[0]),
+                            rate=float(rate_arr[0]), cost_frac=cost_frac)
         shares = policy.target_shares(0.0, state0)
         cost0 = abs(shares) * spot0 * cost_frac  # crossing the spread to establish the hedge
-        cash = result0.price - shares * spot0 - cost0
+        cash = float(price_arr[0]) - shares * spot0 - cost0
         spot_prev = spot0
 
         rows = [{
-            "date": dates[0], "spot": spot0, "T": t0, "delta": result0.greeks.delta,
-            "gamma": result0.greeks.gamma, "theta": result0.greeks.theta,
-            "vega": result0.greeks.vega, "hedge_vol": vol0,
-            "option_value": result0.price, "cash": cash, "shares": shares,
+            "date": dates[0], "spot": spot0, "T": float(t_arr[0]), "delta": float(delta_arr[0]),
+            "gamma": float(gamma_arr[0]), "theta": float(theta_arr[0]),
+            "vega": float(vega_arr[0]), "hedge_vol": float(vol_arr[0]),
+            "option_value": float(price_arr[0]), "cash": cash, "shares": shares,
             "transaction_cost": cost0,
-            "portfolio_value": cash + shares * spot0 - result0.price,
+            "portfolio_value": cash + shares * spot0 - float(price_arr[0]),
         }]
 
         for i in range(1, len(dates)):
             date = dates[i]
-            spot = float(price_path.iloc[i])
-            vol = float(vols.iloc[i])
+            spot = float(spot_arr[i])
+            vol = float(vol_arr[i])
+            t = float(t_arr[i])
+            rate = float(rate_arr[i])
             dt_years = self.clock.elapsed(dates[i - 1], dates[i], floor_at_one_day=True)
-            t = self.clock.time_to_expiry(date.date(), expiration)
             # Financing accrues over this step at the rate for the OPTION'S
             # remaining maturity as of this step (not a separate overnight/
             # repo rate -- see __init__'s docstring for why that's a
             # deliberate simplification, not an oversight).
-            rate = resolve_rate(self.rate, t if t > 0.0 else t0)
             cash *= math.exp(rate * dt_years)
             # Dividend income on the stock leg carried into this interval
             # (held at `shares` since the last rebalance). Without this,
@@ -168,19 +277,15 @@ class HedgingBacktester:
             spot_prev = spot
 
             if t <= 0.0:
-                payoff = max(spot - strike, 0.0) if option_type == "call" else max(strike - spot, 0.0)
+                payoff = float(price_arr[i])
                 cost = abs(shares) * spot * cost_frac  # crossing the spread to unwind the hedge
                 cash += shares * spot - cost  # liquidate the hedge; the unified formula
                 shares, option_value = 0.0, payoff  # below nets out -option_value (=payoff) once
                 delta, gamma, theta, vega = 0.0, 0.0, 0.0, 0.0  # degenerate at expiry
-                vol = float(vols.iloc[i - 1])  # no re-mark at expiry: payoff has no vol
             else:
-                inputs = bscpp.make_inputs(spot, strike, rate, vol, t, option_type,
-                                            self.dividend_yield)
-                result = bscpp.bs_price_with_greeks(inputs)
-                option_value = result.price
-                delta, gamma = result.greeks.delta, result.greeks.gamma
-                theta, vega = result.greeks.theta, result.greeks.vega
+                option_value = float(price_arr[i])
+                delta, gamma = float(delta_arr[i]), float(gamma_arr[i])
+                theta, vega = float(theta_arr[i]), float(vega_arr[i])
                 state = HedgeState(t=t, spot=spot, delta=delta, gamma=gamma, vega=vega,
                                    rate=rate, cost_frac=cost_frac)
                 new_shares = policy.target_shares(shares, state)
