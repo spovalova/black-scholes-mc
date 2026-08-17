@@ -18,13 +18,12 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
 from bscpp.backtest.frontier_plot import plot_frontier
 
 OUTPUT_DIR = Path(__file__).parent / "output"
 ASSETS_DIR = Path(__file__).parent.parent / "assets"
 
-MULTIPLIERS = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+MULTIPLIERS = [0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 11.0, 16.0]
 RISK_AVERSIONS = [0.03, 0.3, 3.0]
 WINDOW_DAYS = 45
 STRIDE_DAYS = 20

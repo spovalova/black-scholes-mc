@@ -59,6 +59,129 @@ attribution, and publication-grade statistics. 18 new tests (76 total).
   the small real sample made the pooled estimate noisier. Corrected here
   rather than silently replaced; the corrected, larger-sample,
   scale-invariant result is the one to trust.
+- **Second methodology correction: post-selection inference and
+  cross-ticker dependence in the frontier study's bootstrap CI.** An
+  external review of the finding above identified two real statistical
+  gaps in how its significance was assessed (not in the point estimate
+  itself, which was already scale-invariant and pooled correctly):
+  - **Post-selection inference**: `c*` was chosen as the argmin of J(c)
+    over 7 (now 11) candidates, and the bootstrap CI for "c* vs c=1" was
+    computed on the SAME sample that did the selecting -- picking the
+    best of several noisy candidates and testing best-vs-baseline on the
+    same data is a textbook winner's-curse setup, yielding an
+    anti-conservatively narrow CI.
+  - **Cross-ticker contemporaneous dependence**: the study pools ~20
+    co-moving tickers' rolling windows; a block bootstrap over rows
+    ordered `(ticker, date)` -- even with blocks long enough to preserve
+    WITHIN-ticker serial dependence -- is blind to windows from DIFFERENT
+    tickers sharing the same `window_start` being correlated (same market
+    vol regime; a broad-market name like SPY moves much of the basket).
+    `n_effective≈178` in the original writeup was optimistic for exactly
+    this reason.
+  - **The fix that was tried first didn't work, and this was caught
+    empirically before shipping it, not after**: the commonly-suggested
+    "cheap fix" for post-selection inference -- re-running the argmin
+    selection INSIDE every bootstrap resample -- was implemented first
+    (`bscpp.backtest.frontier._selection_adjusted_cluster_bootstrap`,
+    since removed). Before trusting it, it was checked with a Monte Carlo
+    coverage simulation: many fresh synthetic samples where every
+    candidate has the IDENTICAL true objective (no real effect), checking
+    how often a nominal-95% CI wrongly excludes zero -- a well-calibrated
+    procedure should do this ~5% of the time. The "reselect inside the
+    bootstrap" version FAILED this test, at one tested scale giving a
+    WORSE false-positive rate (20%) than doing nothing at all (12.5%,
+    against the 5% target). This is a known subtlety in the statistics
+    literature: percentile bootstrap CIs are not generally valid for
+    argmax/argmin-based statistics -- the resampled statistic's own
+    distribution is itself selection-biased, the same problem one level
+    up. **Split-sample selection** (`c*` chosen on the chronologically
+    FIRST HALF of calendar periods, tested without reselecting on the
+    held-out second half) passed the identical coverage simulation
+    cleanly at realistic scale (42 periods x 20 tickers: 3.3%
+    false-positive rate vs. a 5% target, vs. 8% for no-split-at-all) and
+    is what's actually implemented
+    (`bscpp.backtest.frontier._split_sample_bootstrap`). Both the passing
+    and failing simulations are preserved in `test_frontier.py`
+    (previously this module had NO dedicated tests despite driving the
+    project's headline empirical claim), specifically so this doesn't
+    regress silently back to the invalid version.
+  - **Cross-ticker dependence fixed together, not separately**: the
+    held-out half's bootstrap resamples whole CALENDAR PERIODS as one
+    unit (`bscpp.stats.cluster_bootstrap_indices`, new -- every ticker's
+    rows for a resampled period move together), not individual rows.
+    Verified directly (`test_frontier.py`): on synthetic panel data with
+    an induced common per-period shock across "tickers" (the same-date
+    correlation real market data has), the cluster bootstrap's implied
+    sampling uncertainty lands close to the TRUE Monte-Carlo-measured
+    sampling distribution, while a naive row-level bootstrap on the same
+    data understates it by more than 1.5x.
+  - **A real, unrelated bug found while re-running the GBM control arms
+    under the new methodology**: `gbm_control_experiment.py`'s window
+    generator offset each simulated path's calendar anchor by `path_idx`
+    alone, not also by vol level -- so all 5 vol levels reused the SAME
+    10 calendar anchors, collapsing 50 nominally-independent windows onto
+    just 10 distinct `window_start` values. Since these paths share no
+    randomness across vol levels (fresh `rng.normal()` draws per
+    iteration) and have no real reason to be calendar-coincident, this
+    only made an already-independent control arm's new cluster-bootstrap
+    CI needlessly conservative -- caught because the fixed, more careful
+    methodology surfaced a suspiciously thin effective sample size where
+    the data should have supported a much larger one, not because
+    anything crashed. Fixed by giving each vol level its own large
+    calendar offset (`gbm_control_experiment.py`); confirmed 50 windows
+    now produce 50 distinct periods.
+  - **Also fixed in the same pass** (small, but caught by the same
+    review): `run_policy_grid`'s `except Exception: continue` around each
+    backtester call, and its premium-floor skip, dropped cells with no
+    counting -- if failures correlated with particular `(c, lam0)` cells
+    or tickers, those cells would be differentially and invisibly
+    thinned, a direct violation of this project's own "no silent caps"
+    scope commitment. Now counts drops by reason, attaches them to the
+    returned grid's `.attrs`, and `warnings.warn()`s if drops exceed 1%
+    of the expected grid (0% on both the real and GBM studies' latest
+    runs). The exception clause was also narrowed from bare `Exception`
+    to `ValueError` specifically (the only exception type the pricing
+    core actually raises, via `std::invalid_argument` -> pybind11's
+    default translation) -- a real bug (e.g. an `AttributeError` from a
+    logic error) now surfaces instead of being silently swallowed.
+    Synthetic option strikes were also switched from `round(spot0/5)*5`
+    to true ATM (`spot0` exactly) -- these are synthetic options with no
+    listed-strike constraint to respect, so rounding only injected up to
+    ~4% moneyness noise on cheaper names, heterogeneous across tickers,
+    for no offsetting benefit.
+  - **The grid was also refined** from 7 power-of-2-only points (0.25-16)
+    to 11 (adding 1.5/3/6/11) -- the old grid could only report "c* is
+    somewhere in (4, 16)" at its resolution; the real study's `c*=8`
+    read as more precise than the grid actually supported. Both studies
+    now resolve to an exact grid point (`6` and `4` respectively).
+  - **The GBM control arms were widened** from 10 to 100 paths per vol
+    level (50 -> 500 windows per arm) -- at 10 paths, the control arm
+    meant to precisely measure vol-estimation error's contribution had
+    roughly 1/8th the real study's statistical power, underpowered for
+    the "rules out vol-estimation error" language the original writeup
+    used. The wider arms complete a full 11-point-grid x 3-regime sweep
+    in well under a minute (measured, printed by the script itself), so
+    there was no reason to stay thin.
+  - **Net effect on the published numbers**: real data `c*=8x`/`+35.7%`
+    -> `c*=6x`/`+32.9%` at the moderate risk-aversion regime;
+    `c*=4x`/`+20.7%` -> `c*=4x`/`+19.7%` at the high regime (unchanged
+    point, tighter validation). GBM-true-vol `c*=8x`/`+36.5%` ->
+    `c*=6x`/`+30.0%` (now matching real data exactly) and `c*=4x`/`+20.3%`
+    -> `c*=3x`/`+17.7%` (one grid step short of real data, a small,
+    honestly-reported residual rather than the earlier "sufficient on its
+    own, full stop" framing). The finding survived a materially more
+    rigorous test of itself -- that's part of the result, not a
+    disclaimer on it.
+  - `bscpp.stats._stationary_bootstrap_indices` (the primitive
+    `cluster_bootstrap_indices` and every bootstrap in this project builds
+    on) was also rewritten from a per-element Python loop to a fully
+    vectorized construction (Bernoulli block-start indicators + one
+    vectorized fresh-start draw per block, no explicit loop) while this
+    module was open for the cluster-bootstrap addition -- measured 16.5x
+    faster on a 420-observation, 2000-resample CI (303ms -> 18ms),
+    verified to preserve the exact geometric block-length distribution
+    the original per-element version had (`test_frontier.py`), not just
+    assumed equivalent from the derivation.
 
 ### Added
 

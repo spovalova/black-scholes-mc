@@ -29,65 +29,110 @@ knowing the true volatility, or real markets not being GBM?**
 the exact identity `band(risk_aversion = lam0/c^3) = c * band(lam0)`,
 regression-tested in `test_policies.py`) across real daily closes for 20
 liquid tickers over 3 years (420 rolling out-of-sample windows) and 3
-risk-aversion regimes. Each width is scored by a **scale-invariant**
-mean-variance objective, `J(c) = mean(cost/premium0) + lam*mean(variance/
-premium0^2)` -- cost and variance normalized by each window's own option
-premium *before* pooling, not after (see `bscpp.backtest.frontier`).
-This matters: dollar cost scales with spot*turnover and dollar variance
-with spot^2*sigma^2*T, so a raw-dollar objective makes a fixed lambda mean
-something different for a ~$580 SPY window than a $100 simulated path --
-exactly the confound a cross-configuration comparison (real vs. simulated)
-can't afford.
+risk-aversion regimes, at an 11-point grid (power-of-2 anchors 0.25-16
+plus intermediate points 1.5/3/6/11, resolving c\* to an actual grid point
+rather than "somewhere in a factor-of-4 gap"). Each width is scored by a
+**scale-invariant** mean-variance objective, `J(c) = mean(cost/premium0) +
+lam*mean(variance/premium0^2)` -- cost and variance normalized by each
+window's own option premium *before* pooling, not after (see
+`bscpp.backtest.frontier`). This matters: dollar cost scales with
+spot*turnover and dollar variance with spot^2*sigma^2*T, so a raw-dollar
+objective makes a fixed lambda mean something different for a ~$580 SPY
+window than a $100 simulated path -- exactly the confound a
+cross-configuration comparison (real vs. simulated) can't afford.
 
 One of the three regimes is cost-dominated -- the objective keeps
 improving to the edge of the tested grid, a methodological trap, not a
 finding. The other two are well-posed (interior optimum, genuinely
 trading cost against variance), and **both show a real, statistically
-significant gap**: the empirically cost-risk-minimizing band is **8x wider
-than theory (+35.7%, bootstrap CI [0.0054, 0.0078], n=420,
-n_effective≈178)** at the moderate risk-aversion regime, and **4x wider
-(+20.7%, CI [0.0049, 0.0071], n_effective≈189)** at the high one. Checked
-per-ticker, not just pooled: 16/16 and 19/19 tickers with their own
-well-posed optimum individually show c\*>1 -- broad-based, not one name
-driving it.
+significant gap**: the empirically cost-risk-minimizing band is **6x wider
+than theory (+32.9%)** at the moderate risk-aversion regime, and **4x
+wider (+19.7%)** at the high one. Checked per-ticker, not just pooled:
+20/20 and 19/19 tickers with their own well-posed optimum individually
+show c\*>1 -- broad-based, not one name driving it.
+
+**Both numbers are validated by SPLIT-SAMPLE, PERIOD-CLUSTERED bootstrap
+CIs**, not a plain pooled-sample one -- see `bscpp.backtest.frontier`'s
+`_split_sample_bootstrap`, and the "Methodology correction" note below for
+why a simpler version of this CI was tried, tested, and found NOT to be
+valid before this one was: c\* is selected on the chronologically FIRST
+HALF of the study's calendar periods and tested, without reselecting, on
+the held-out second half (avoiding post-selection inference -- picking
+the best of 11 candidates and testing best-vs-baseline on the SAME data
+that did the picking is a textbook winner's-curse setup), and the
+held-out half's bootstrap resamples whole CALENDAR PERIODS together, not
+individual (ticker, window) rows (avoiding understated uncertainty from
+same-date rows across 20 co-moving tickers being treated as independent).
+Moderate regime: 95% CI `[+0.0062, +0.0081]` on 11 held-out periods
+(`n_effective=11`); high regime: `[+0.0060, +0.0084]` on 11
+(`n_effective=11`) -- both cleanly exclude zero despite the halved,
+deliberately more conservative sample this validation uses.
 
 Run it yourself: `python examples/hedging_policy_frontier_study.py`
 (needs `POLYGON_API_KEY`, base equities tier only).
 
 **Control experiments** (`examples/gbm_control_experiment.py`, no API key
-needed) isolate *why*, running the identical sweep/objective on simulated
-GBM paths at the same daily-rebalancing cadence, in two arms: `hedge_vol`
-= the *true* simulation vol (isolates discretization alone), and
-`hedge_vol` = a trailing-window realized-vol estimate computed exactly as
-the real study computes it (isolates discretization + vol-estimation
+needed) isolate *why*, running the identical sweep/objective/grid on
+simulated GBM paths at the same daily-rebalancing cadence and a properly-
+powered 500 windows per arm (5 vol levels x 100 paths), in two arms:
+`hedge_vol` = the *true* simulation vol (isolates discretization alone),
+and `hedge_vol` = a trailing-window realized-vol estimate computed exactly
+as the real study computes it (isolates discretization + vol-estimation
 error together). Result: **`gbm_true_vol` alone reproduces the real-data
-optimum almost exactly** -- `c*=8x` (+36.5%) at the moderate regime and
-`c*=4x` (+20.3%) at the high one, matching the real study's `8x`/`4x` on
-this grid. Adding vol-estimation error (`gbm_estimated_vol`) does **not**
-move the result closer to real data -- if anything it moves *away*
-(`c*=4x` at the moderate regime, undershooting real data's `8x`) or stays
-flat (`c*=4x` at the high regime, unchanged). That rules out vol-
-estimation error as the primary mechanism and points squarely at
-discretization: WW's continuous-monitoring assumption, violated by
-ordinary once-daily rebalancing under otherwise-exact GBM dynamics, is
-**sufficient on its own** to reproduce the real-data band-widening at
-this resolution -- real-market structure (fat tails, volatility
-clustering, autocorrelation) is not needed as an additional explanation.
+optimum almost exactly** -- `c*=6x` (+30.0%) at the moderate regime,
+exactly matching the real study's `6x`, and `c*=3x` (+17.7%) at the high
+one, one grid step short of the real study's `4x`. Adding vol-estimation
+error (`gbm_estimated_vol`) barely moves either number (`c*=6x`/+29.7% and
+`c*=3x`/+17.3%) -- the two arms are close enough to be within each
+other's noise. That rules out vol-estimation error as a material
+mechanism and points mainly at discretization: WW's continuous-monitoring
+assumption, violated by ordinary once-daily rebalancing under otherwise-
+exact GBM dynamics, reproduces essentially all of the real-data band-
+widening at the moderate regime and most of it at the high regime --
+leaving a small (~1 grid step), not confidently distinguishable-from-noise
+residual at high risk-aversion that real-market structure (fat tails,
+volatility clustering, autocorrelation) could still be contributing.
 
 Run it yourself: `python examples/gbm_control_experiment.py` (no API key
 needed) followed by `python examples/plot_hedging_frontier.py` to
 regenerate the figure above.
 
-**This corrects an earlier draft of this finding** run before the
+**Methodology correction (this is the second one -- see below for the
+first)**: an earlier version of this finding used a plain pooled-sample
+bootstrap CI on the already-selected c\* -- a real statistical flaw
+(post-selection inference: c\* is chosen as the best of several candidates
+on the SAME data the CI is then computed from, an anti-conservative
+setup), compounded by a block bootstrap that resampled individual
+(ticker, window) rows rather than calendar periods, understating
+uncertainty from 20 co-moving tickers sharing same-date market regimes.
+**The fix that was tried first didn't work and was caught before being
+trusted, not after**: re-running the argmin selection inside every
+bootstrap resample (a commonly-suggested "cheap fix" for post-selection
+inference) was implemented, then checked with a Monte Carlo coverage
+simulation (many fresh synthetic samples where no candidate is truly
+better than baseline, checking how often a nominal-95% CI wrongly excludes
+zero) -- and FAILED it, giving a worse false-positive rate than doing
+nothing at realistic sample sizes. Split-sample selection (train on the
+first half of calendar time, test on the held-out second half) passed the
+same simulation cleanly and is what's actually implemented; see
+`bscpp.backtest.frontier`'s module docstring and `test_frontier.py` for
+both the passing and failing simulations, kept in the test suite so this
+doesn't regress silently. The headline numbers moved modestly under the
+corrected methodology (`8x`/`+35.7%` -> `6x`/`+32.9%` at the moderate
+regime; `4x`/`+20.7%` -> `4x`/`+19.7%` at the high regime, unchanged) --
+the finding survived a materially more rigorous test, which is itself
+part of the result, not just a footnote.
+
+**The first correction**, to an even earlier draft run before the
 scale-invariant objective existed, on 5 tickers/50 windows instead of 20/
-420, with a `RISK_AVERSIONS` grid not shared across arms. That version
+420, with a `RISK_AVERSIONS` grid not shared across arms: that version
 reported a real-data gap of only `+7%` (`c*~2x`) against a GBM-true-vol
 gap of `+20%` (`c*=4x`) -- GBM *overshooting* real data, the opposite
 conclusion from the one above. The earlier numbers weren't wrong given
 what they measured, but what they measured wasn't comparable across arms:
 a raw-dollar objective on a small, noisy real sample against a differently
--scaled GBM config. Corrected here rather than quietly replaced -- see
-CHANGELOG.
+-scaled GBM config. Both corrections are documented rather than quietly
+replaced -- see CHANGELOG.
 
 ## Layout
 
@@ -122,8 +167,8 @@ python/bscpp/                 Python package (imports the compiled extension)
     heston_calibration.py          fits Heston params to a chain's implied vols,
                                     with regularization + a stability diagnostic
 
-tests/                        pytest suite (76 tests). `pytest -m "not slow"`
-                               runs the fast subset (~15s); full suite includes
+tests/                        pytest suite (144 tests). `pytest -m "not slow"`
+                               runs the fast subset (141 tests, ~7s); full suite includes
                                heavy MC convergence and multi-start calibration checks
 examples/                     runnable demos -- all but run_backtest.py (non-mock),
                                real_data_hedging_demo.py, and

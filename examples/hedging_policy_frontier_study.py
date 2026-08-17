@@ -41,11 +41,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from dotenv import load_dotenv
-
 from bscpp.backtest import PolygonProvider
-from bscpp.backtest.frontier import print_frontier_report, run_policy_grid, score_frontier
+from bscpp.backtest.frontier import (
+    print_frontier_report,
+    run_policy_grid,
+    score_frontier,
+)
 from bscpp.clock import Clock
+from dotenv import load_dotenv
 
 GRID_OUTPUT_PATH = Path(__file__).parent / "output" / "real_data_grid.csv"
 
@@ -56,7 +59,12 @@ TICKERS = [
 LOOKBACK_DAYS = 365 * 3 + 30
 WINDOW_DAYS = 45
 STRIDE_DAYS = 20
-MULTIPLIERS = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+# Power-of-2 anchors (0.25..16) plus intermediate points (1.5, 3, 6, 11)
+# around where c* has actually landed in every regime tested so far (4-8x
+# theory) -- the original power-of-2-only grid could only report "c* is
+# somewhere in (4, 16)" at that resolution, which is a materially weaker
+# claim than "c*=8" reads as. Identical to gbm_control_experiment.py.
+MULTIPLIERS = [0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 11.0, 16.0]
 # Identical to gbm_control_experiment.py -- the whole point of the
 # scale-invariant objective is that the same RISK_AVERSIONS grid means the
 # same thing here as it does there, which the old raw-dollar objective
@@ -98,7 +106,7 @@ def per_ticker_breakdown(findings_by_ticker: dict) -> pd.DataFrame:
         for f in findings:
             rows.append({"ticker": ticker, "lam0": f.lam0, "c_star": f.c_star,
                          "gap_pct": f.gap_pct, "at_boundary": f.at_boundary,
-                         "n_windows": len(f.per_window_gap)})
+                         "n_periods": len(f.per_period_gap)})
     return pd.DataFrame(rows)
 
 

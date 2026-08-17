@@ -47,18 +47,23 @@ No market data or API key needed.
     python examples/gbm_control_experiment.py
 """
 
+import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
-from bscpp.backtest.frontier import print_frontier_report, run_policy_grid, score_frontier
+from bscpp.backtest.frontier import (
+    print_frontier_report,
+    run_policy_grid,
+    score_frontier,
+)
 from bscpp.clock import Clock
 
 GRID_OUTPUT_DIR = Path(__file__).parent / "output"
 
-# Identical to hedging_policy_frontier_study.py.
-MULTIPLIERS = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+# Identical to hedging_policy_frontier_study.py (see that file for why the
+# intermediate points were added, not just the power-of-2 anchors).
+MULTIPLIERS = [0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 11.0, 16.0]
 RISK_AVERSIONS = [0.03, 0.3, 3.0]
 TRANSACTION_COST_BPS = 5.0
 RATE = 0.05
@@ -66,7 +71,14 @@ WINDOW_DAYS = 45
 TRAILING_WINDOW_DAYS = 45  # same trailing length real study uses for the vol estimate
 
 VOL_LEVELS = [0.15, 0.20, 0.25, 0.30, 0.35]
-PATHS_PER_VOL = 10
+# Was 10 (50 windows total): with the real study's ~420 windows, a control
+# arm at that scale had ~1/8th the statistical power to detect a
+# vol-estimation-error effect it was supposed to be measuring precisely --
+# underpowered for the strength of the "ruled out" language this study
+# uses. 100 is cheap (the harness runs a full 11-point-grid x 3-regime
+# sweep over 500 windows in well under a minute -- see the timing this
+# script prints), so there's no reason to stay thin here.
+PATHS_PER_VOL = 100
 SPOT0 = 100.0
 SEED = 20260813
 
@@ -99,10 +111,28 @@ def simulate_gbm_windows(vol_levels, paths_per_vol, seed) -> list[dict]:
     anchor = pd.Timestamp("2024-01-01")
     true_vol_windows, estimated_vol_windows = [], []
 
-    for vol in vol_levels:
+    for vol_idx, vol in enumerate(vol_levels):
         for path_idx in range(paths_per_vol):
             total_days = TRAILING_WINDOW_DAYS + WINDOW_DAYS
-            dates = pd.bdate_range(anchor + pd.Timedelta(days=path_idx * 3), periods=total_days)
+            # Offsetting by path_idx alone made every vol level reuse the
+            # SAME `paths_per_vol` calendar anchors (path_idx cycles 0..9
+            # under each of 5 vol levels) -- 50 windows collapsed onto
+            # just 10 distinct window_start dates. That's not a cosmetic
+            # issue: score_frontier's split-sample bootstrap clusters by
+            # window_start specifically to capture GENUINE same-date
+            # cross-sectional dependence (see frontier.py) -- these paths
+            # share no randomness across vol levels (fresh rng.normal()
+            # draws per iteration) and have no real reason to be
+            # calendar-coincident, so the collision only made an already-
+            # independent control arm's CI needlessly conservative,
+            # clustering unrelated paths together for no statistical
+            # reason. The large per-vol-level offset below guarantees
+            # every (vol, path_idx) combination gets its own distinct
+            # anchor, restoring the genuine one-window-per-cluster
+            # independence this arm is supposed to have.
+            vol_offset_days = vol_idx * (paths_per_vol * 3 + total_days)
+            dates = pd.bdate_range(anchor + pd.Timedelta(days=vol_offset_days + path_idx * 3),
+                                    periods=total_days)
             day_gaps = np.diff(dates.values).astype("timedelta64[D]").astype(float)
             dt_years = day_gaps / 365.0
 
@@ -128,15 +158,21 @@ def simulate_gbm_windows(vol_levels, paths_per_vol, seed) -> list[dict]:
 
 
 def run_arm(windows, label, save_name):
+    t0 = time.perf_counter()
     grid = run_policy_grid(windows, MULTIPLIERS, RISK_AVERSIONS, RATE, TRANSACTION_COST_BPS)
+    grid_time = time.perf_counter() - t0
     GRID_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     grid.to_csv(GRID_OUTPUT_DIR / save_name, index=False)  # lets plot_hedging_frontier.py reuse this run
     # Independent simulated paths, no time overlap, no shared randomness --
     # unlike the real study's rolling windows there is no serial dependence
     # to preserve, so block length 1 (plain i.i.d. resampling) is correct,
     # not copied from the real study's overlap-derived length.
+    t0 = time.perf_counter()
     findings = score_frontier(grid, MULTIPLIERS, RISK_AVERSIONS, block_len=1.0)
+    score_time = time.perf_counter() - t0
     print_frontier_report(findings, MULTIPLIERS, label=label)
+    print(f"  [{len(windows)} windows x {len(RISK_AVERSIONS)} lam0 x {len(MULTIPLIERS)} c grid: "
+          f"{grid_time:.1f}s backtesting, {score_time:.1f}s split-sample bootstrap scoring]\n")
     return findings
 
 

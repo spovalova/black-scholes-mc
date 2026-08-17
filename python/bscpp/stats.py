@@ -139,17 +139,76 @@ def _stationary_bootstrap_indices(n: int, avg_block_len: float,
     1 - 1/avg_block_len (geometric lengths, mean avg_block_len), wrapping
     circularly. The resulting resampled series is stationary, unlike
     fixed-block schemes.
+
+    Fully vectorized (no per-element Python loop, unlike an earlier
+    version of this function): a naive per-index loop cost ~1.7M Python-
+    level RNG calls for a single 2000-resample CI on a 420-observation
+    series -- the dominant cost of every CI in this project, since
+    stationary_block_bootstrap/dependent_correlation_ci call this once
+    per resample. Equivalent construction, no explicit loop:
+
+      1. B[i] ~ Bernoulli(p), B[0] forced True -- B[i]=True marks that
+         position i STARTS a fresh block (a new uniform-random restart
+         point), matching "continue w.p. 1-p, else restart" from the
+         original formulation exactly (block lengths are still
+         Geometric(p), mean avg_block_len).
+      2. block_id[i] = (number of Trues in B[0..i]) - 1 -- which block
+         each position belongs to.
+      3. Each block gets ONE fresh random start (vectorized, one draw per
+         block instead of one per position that restarts).
+      4. idx[i] = (that block's start + i's offset from its block's first
+         position) mod n -- circular continuation, exactly as before.
+
+    Verified (test_stats.py) to preserve the statistical properties this
+    function's callers depend on (block-bootstrap CI coverage on i.i.d.
+    data, wider CIs under positive dependence) -- not just assumed
+    equivalent from the derivation above.
     """
+    n = int(n)
     p = 1.0 / max(avg_block_len, 1.0)
-    idx = np.empty(n, dtype=np.int64)
-    t = int(rng.integers(0, n))
-    for i in range(n):
-        idx[i] = t
-        if rng.random() < p:
-            t = int(rng.integers(0, n))  # start a new block
-        else:
-            t = (t + 1) % n  # continue the current block, circularly
-    return idx
+    starts_new_block = rng.random(n) < p
+    starts_new_block[0] = True
+
+    block_id = np.cumsum(starts_new_block) - 1
+    block_first_pos = np.flatnonzero(starts_new_block)
+    n_blocks = block_first_pos.size
+
+    block_starts = rng.integers(0, n, size=n_blocks)
+    offset_within_block = np.arange(n) - block_first_pos[block_id]
+    idx = (block_starts[block_id] + offset_within_block) % n
+    return idx.astype(np.int64)
+
+
+def cluster_bootstrap_indices(cluster_row_idx: list[np.ndarray], avg_block_len: float,
+                               rng: np.random.Generator) -> np.ndarray:
+    """Row indices (into the ORIGINAL data) for one stationary-bootstrap
+    resample at the CLUSTER level, not the observation level.
+
+    For panel data where units sharing a cluster id (e.g. the same
+    calendar period, across many co-moving tickers) are contemporaneously
+    dependent -- not just serially dependent within one unit's own time
+    series -- a plain block bootstrap over a flattened, single-axis-
+    ordered array is blind to that dependence: if the array is ordered
+    (ticker, date) and blocked along that concatenation, same-date rows
+    from DIFFERENT tickers can sit many lags apart, invisible to a block
+    short enough to capture genuine serial dependence. This resamples
+    whole clusters together instead -- applying the SAME Politis-Romano
+    scheme (geometric block lengths of CONSECUTIVE clusters, mean
+    avg_block_len) one level up, via _stationary_bootstrap_indices on the
+    cluster axis, then expanding each drawn cluster back out to all of
+    its member rows (with repeats when a cluster is drawn more than once,
+    exactly as with-replacement cluster resampling should behave).
+
+    cluster_row_idx: cluster_row_idx[k] = the row indices (into the
+    original data) belonging to cluster k, for clusters 0..n_clusters-1
+    in a fixed, caller-defined order (typically sorted by the cluster
+    key, e.g. calendar date) -- precompute this ONCE outside any
+    resampling loop; only the (cheap) cluster-level index draw and the
+    concatenation below repeat per resample.
+    """
+    n_clusters = len(cluster_row_idx)
+    drawn_clusters = _stationary_bootstrap_indices(n_clusters, avg_block_len, rng)
+    return np.concatenate([cluster_row_idx[k] for k in drawn_clusters])
 
 
 def _default_block_len(x: np.ndarray) -> float:

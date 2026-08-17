@@ -8,24 +8,45 @@ from __future__ import annotations
 
 import numpy as np
 
-from bscpp.stats import stationary_block_bootstrap
+from bscpp.stats import cluster_bootstrap_indices
 
 
-def objective_curve_with_ci(grid, multipliers, lam0, block_len, level=0.95):
+def objective_curve_with_ci(grid, multipliers, lam0, block_len, level=0.95, n_boot=2000, seed=0):
     """Per-c bootstrap CI on the mean normalized objective J(c) for one
     risk-aversion regime -- the whole curve's sampling uncertainty, not
-    just the gap between c* and c=1 that FrontierRegime reports."""
+    just the gap between c* and c=1 that FrontierRegime reports.
+
+    Clusters by window_start (calendar period), not individual (ticker,
+    window) rows, for the same reason bscpp.backtest.frontier's
+    _split_sample_bootstrap does: rows from DIFFERENT tickers sharing the
+    same window_start are contemporaneously correlated (same market vol
+    regime), which a plain row-level block bootstrap is blind to -- see
+    frontier.py's docstring for the full derivation. This function isn't
+    testing a selected c* against a baseline, so it doesn't need the
+    split-sample half of that fix, only the clustering half.
+    """
     sub = grid[grid["lam0"] == lam0].copy()
     sub["objective"] = sub["total_cost"] / sub["premium0"] + \
         lam0 * sub["pnl_variance"] / sub["premium0"] ** 2
 
     means, los, his = [], [], []
     for c in multipliers:
-        vals = sub[sub["c"] == c].sort_values(["label", "window_start"])["objective"].to_numpy()
-        boot = stationary_block_bootstrap(vals, avg_block_len=block_len, level=level)
-        means.append(boot.estimate)
-        los.append(boot.ci_low)
-        his.append(boot.ci_high)
+        cell = sub[sub["c"] == c]
+        vals = cell["objective"].to_numpy()
+        periods = np.sort(cell["window_start"].unique())
+        cluster_row_idx = [np.flatnonzero(cell["window_start"].to_numpy() == p) for p in periods]
+
+        rng = np.random.default_rng(seed)
+        boot_means = np.empty(n_boot)
+        for b in range(n_boot):
+            idx = cluster_bootstrap_indices(cluster_row_idx, block_len, rng)
+            boot_means[b] = vals[idx].mean()
+        alpha = (1.0 - level) / 2.0
+        lo, hi = np.quantile(boot_means, [alpha, 1.0 - alpha])
+
+        means.append(float(vals.mean()))
+        los.append(float(lo))
+        his.append(float(hi))
     return np.array(means), np.array(los), np.array(his)
 
 
